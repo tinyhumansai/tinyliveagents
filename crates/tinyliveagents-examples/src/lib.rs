@@ -8,8 +8,6 @@
 //!
 //! Nothing here is used by the library itself.
 
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
-
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -28,60 +26,132 @@ pub fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Reads `len` bytes at `at`, or fails when they run past the buffer.
+fn field<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N], BoxError> {
+    at.checked_add(N)
+        .and_then(|end| bytes.get(at..end))
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| "wav chunk runs past the end of the file".into())
+}
+
 /// Extracts PCM16 mono samples and the sample rate from a WAV file's bytes.
+///
+/// A `data` chunk whose declared size is the streaming placeholder (`0` or
+/// `0xFFFFFFFF`) runs to the end of the buffer; any other size must fit.
+///
+/// # Errors
+///
+/// When the bytes are not a RIFF/WAVE file, a chunk is truncated, the format
+/// is not 16-bit mono integer PCM, or there is no `data` chunk.
 pub fn parse_wav(bytes: &[u8]) -> Result<(u32, Vec<u8>), BoxError> {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
         return Err("not a wav file".into());
     }
-    let mut offset = 12;
-    let mut rate = 0;
-    while offset + 8 <= bytes.len() {
-        let id = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into()?) as usize;
+    let mut offset = 12_usize;
+    let mut rate = None;
+    while offset < bytes.len() {
+        let id: [u8; 4] = field(bytes, offset)?;
+        let size = u32::from_le_bytes(field(bytes, offset + 4)?);
         let body = offset + 8;
-        if id == b"fmt " {
-            let channels = u16::from_le_bytes(bytes[body + 2..body + 4].try_into()?);
-            rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into()?);
-            let bits = u16::from_le_bytes(bytes[body + 14..body + 16].try_into()?);
-            if channels != 1 || bits != 16 {
-                return Err("only 16-bit mono wav is supported".into());
+        if &id == b"fmt " {
+            if size < 16 {
+                return Err("wav fmt chunk is too short".into());
             }
-        } else if id == b"data" {
-            let end = (body + size).min(bytes.len());
-            return Ok((rate, bytes[body..end].to_vec()));
+            let format = u16::from_le_bytes(field(bytes, body)?);
+            let channels = u16::from_le_bytes(field(bytes, body + 2)?);
+            let sample_rate = u32::from_le_bytes(field(bytes, body + 4)?);
+            let bits = u16::from_le_bytes(field(bytes, body + 14)?);
+            if format != 1 || channels != 1 || bits != 16 {
+                return Err("only 16-bit mono integer PCM wav is supported".into());
+            }
+            rate = Some(sample_rate);
+        } else if &id == b"data" {
+            let rate = rate.ok_or("wav data chunk comes before its fmt chunk")?;
+            let end = if size == 0 || size == u32::MAX {
+                bytes.len()
+            } else {
+                body.checked_add(size as usize)
+                    .filter(|end| *end <= bytes.len())
+                    .ok_or("wav data chunk is truncated")?
+            };
+            return Ok((
+                rate,
+                bytes
+                    .get(body..end)
+                    .ok_or("wav data chunk is truncated")?
+                    .to_vec(),
+            ));
         }
-        offset = body + size + (size & 1);
+        let padded = (size as usize).checked_add(size as usize & 1);
+        offset = padded
+            .and_then(|len| body.checked_add(len))
+            .ok_or("wav chunk size overflows")?;
     }
     Err("wav has no data chunk".into())
 }
 
 /// Reads a PCM16 mono WAV file.
+///
+/// # Errors
+///
+/// When the file cannot be read or [`parse_wav`] rejects it.
 pub async fn read_wav(path: &Path) -> Result<(u32, Vec<u8>), BoxError> {
     parse_wav(&tokio::fs::read(path).await?)
 }
 
+/// Reads a WAV file that must be 16 kHz PCM16 mono, the rate the examples
+/// stream at.
+///
+/// # Errors
+///
+/// When [`read_wav`] fails or the file is not 16 kHz.
+pub async fn read_wav_16k(path: &Path) -> Result<Vec<u8>, BoxError> {
+    let (rate, pcm) = read_wav(path).await?;
+    if rate != 16_000 {
+        return Err(format!(
+            "{} is {rate} Hz; 16 kHz PCM16 mono is required",
+            path.display()
+        )
+        .into());
+    }
+    Ok(pcm)
+}
+
 /// Encodes PCM16 mono audio as a WAV file.
-#[must_use]
-pub fn wav_bytes(rate: u32, pcm: &[u8]) -> Vec<u8> {
-    let data_len = u32::try_from(pcm.len()).unwrap_or(u32::MAX);
+///
+/// # Errors
+///
+/// When the audio or the byte rate does not fit a WAV header's 32-bit fields.
+pub fn wav_bytes(rate: u32, pcm: &[u8]) -> Result<Vec<u8>, BoxError> {
+    let data_len = u32::try_from(pcm.len()).map_err(|_| "audio is too long for a wav file")?;
+    let riff_len = data_len
+        .checked_add(36)
+        .ok_or("audio is too long for a wav file")?;
+    let byte_rate = rate
+        .checked_mul(2)
+        .ok_or("sample rate is too high for a wav file")?;
     let mut out = Vec::with_capacity(pcm.len() + 44);
     out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(&riff_len.to_le_bytes());
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16_u32.to_le_bytes());
     out.extend_from_slice(&1_u16.to_le_bytes());
     out.extend_from_slice(&1_u16.to_le_bytes());
     out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
     out.extend_from_slice(&2_u16.to_le_bytes());
     out.extend_from_slice(&16_u16.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
     out.extend_from_slice(pcm);
-    out
+    Ok(out)
 }
 
 /// Synthesizes `text` as 16 kHz PCM16 with Sarvam's REST TTS.
+///
+/// # Errors
+///
+/// When the request fails, Sarvam refuses it, or the audio is not 16 kHz.
 pub async fn sarvam_speech(api_key: &str, text: &str, language: &str) -> Result<Vec<u8>, BoxError> {
     let response: Value = reqwest::Client::new()
         .post("https://api.sarvam.ai/text-to-speech")
@@ -171,6 +241,10 @@ impl std::fmt::Debug for Recording {
 /// Plays `utterance` (16 kHz PCM16) into `session` in 100 ms frames at real
 /// time, then silence, answering `get_time` calls, until a turn completes after
 /// a tool call (or any turn when `expect_tool` is false) or `timeout` passes.
+///
+/// # Errors
+///
+/// When the first event is not `Ready` or a tool result cannot be sent.
 pub async fn converse(
     session: &mut LiveSession,
     utterance: &[u8],
@@ -190,7 +264,7 @@ pub async fn converse(
     let frame = 3_200;
     let mut frames: Vec<Bytes> = utterance
         .chunks(frame)
-        .map(|c| Bytes::copy_from_slice(c))
+        .map(Bytes::copy_from_slice)
         .collect();
     frames.extend(std::iter::repeat_n(Bytes::from(vec![0_u8; frame]), 20));
     let pump_sender = sender.clone();
@@ -263,15 +337,23 @@ pub async fn converse(
     Ok(recording)
 }
 
+/// Whether [`question_audio`] has a source: `LIVE_TEST_WAV` or
+/// `SARVAM_API_KEY`. Live tests skip when it has none.
+#[must_use]
+pub fn audio_source_available() -> bool {
+    env("LIVE_TEST_WAV").is_some() || env("SARVAM_API_KEY").is_some()
+}
+
 /// The spoken question the examples and live tests ask: `LIVE_TEST_WAV` (a
 /// 16 kHz PCM16 mono file) when set, otherwise synthesized with Sarvam TTS.
+///
+/// # Errors
+///
+/// When neither source is configured, the file is unusable, or synthesis
+/// fails.
 pub async fn question_audio(text: &str) -> Result<Vec<u8>, BoxError> {
     if let Some(path) = env("LIVE_TEST_WAV") {
-        let (rate, pcm) = read_wav(Path::new(&path)).await?;
-        if rate != 16_000 {
-            return Err("LIVE_TEST_WAV must be 16 kHz".into());
-        }
-        return Ok(pcm);
+        return read_wav_16k(Path::new(&path)).await;
     }
     let key = env("SARVAM_API_KEY").ok_or("set LIVE_TEST_WAV or SARVAM_API_KEY")?;
     sarvam_speech(&key, text, "en-IN").await
@@ -279,6 +361,10 @@ pub async fn question_audio(text: &str) -> Result<Vec<u8>, BoxError> {
 
 /// Calls a TinyHumans backend route with `TINYHUMANS_API_KEY` and returns the
 /// response's `data` (or the whole body when unwrapped).
+///
+/// # Errors
+///
+/// When the key is unset, the request fails, or the backend refuses it.
 pub async fn tinyhumans(
     method: reqwest::Method,
     path: &str,
@@ -298,6 +384,10 @@ pub async fn tinyhumans(
 
 /// Mints a Gemini Live relay ticket for `config` and returns `(ws_url,
 /// session_id, model)`.
+///
+/// # Errors
+///
+/// When minting fails or the ticket lacks one of those fields.
 pub async fn mint_gemini_ticket(
     config: &tinyliveagents::LiveConfig,
 ) -> Result<(String, String, String), BoxError> {
@@ -317,3 +407,7 @@ pub async fn mint_gemini_ticket(
     };
     Ok((field("wsUrl")?, field("sessionId")?, field("model")?))
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

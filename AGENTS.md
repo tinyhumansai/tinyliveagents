@@ -69,7 +69,7 @@ runs exactly them, so a green local run should mean a green CI run.
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
-cargo test --all-features
+cargo test --workspace --all-features
 ```
 
 Supporting commands:

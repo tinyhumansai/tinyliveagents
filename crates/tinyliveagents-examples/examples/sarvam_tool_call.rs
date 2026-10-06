@@ -14,7 +14,7 @@ use std::time::Duration;
 use tinyliveagents::sarvam::SarvamCascade;
 use tinyliveagents::{LiveConfig, LiveProvider};
 use tinyliveagents_examples::{
-    BoxError, converse, env, get_time_tool, read_wav, sarvam_speech, wav_bytes,
+    BoxError, converse, env, get_time_tool, read_wav_16k, sarvam_speech, wav_bytes,
 };
 
 #[tokio::main]
@@ -25,7 +25,7 @@ async fn main() -> Result<(), BoxError> {
     let output = PathBuf::from(args.next().unwrap_or_else(|| "sarvam-reply.wav".into()));
 
     let utterance = match input {
-        Some(path) => read_wav(&path).await?.1,
+        Some(path) => read_wav_16k(&path).await?,
         None => sarvam_speech(&key, "What time is it in UTC right now?", "en-IN").await?,
     };
     let config = LiveConfig::new()
@@ -43,7 +43,7 @@ async fn main() -> Result<(), BoxError> {
         recording.first_audio_ms
     );
     println!("errors: {:?}", recording.errors);
-    tokio::fs::write(&output, wav_bytes(recording.output_rate, &recording.audio)).await?;
+    tokio::fs::write(&output, wav_bytes(recording.output_rate, &recording.audio)?).await?;
     println!(
         "wrote {} ({} bytes of audio)",
         output.display(),

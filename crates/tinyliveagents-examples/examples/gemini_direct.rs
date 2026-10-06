@@ -38,7 +38,7 @@ async fn main() -> Result<(), BoxError> {
             &recording.errors
         )
     );
-    tokio::fs::write(&output, wav_bytes(recording.output_rate, &recording.audio)).await?;
+    tokio::fs::write(&output, wav_bytes(recording.output_rate, &recording.audio)?).await?;
     println!("wrote {output}");
     Ok(())
 }
