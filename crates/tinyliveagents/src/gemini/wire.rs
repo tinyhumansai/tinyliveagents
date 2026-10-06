@@ -7,11 +7,13 @@
 //! `toolCallCancellation`, `usageMetadata`, `sessionResumptionUpdate` and
 //! `goAway`. Server frames may arrive as text or binary; both hold JSON.
 //!
-//! Gemini streams transcriptions as fragments. The codec accumulates them so
-//! every [`LiveEvent::InputTranscript`] / [`LiveEvent::OutputTranscript`]
-//! carries the utterance *so far*, and closes each utterance with an
-//! `is_final` event: the user's when the model starts answering, the agent's
-//! when its turn completes or is interrupted.
+//! Gemini streams transcriptions as fragments, and input transcription is
+//! delivered independently of the model's output with no ordering guarantee.
+//! The codec accumulates fragments so every [`LiveEvent::InputTranscript`] /
+//! [`LiveEvent::OutputTranscript`] carries the utterance *so far*, and closes
+//! both utterances with `is_final` events at `turnComplete` (the agent's also
+//! at `interrupted`), never earlier, so a late user fragment still joins its
+//! own utterance.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -121,7 +123,6 @@ impl GeminiCodec {
             .pointer("/modelTurn/parts")
             .and_then(Value::as_array)
         {
-            self.finish_input(out);
             for part in parts {
                 if part.get("thought").and_then(Value::as_bool) == Some(true) {
                     continue;
@@ -141,7 +142,6 @@ impl GeminiCodec {
             }
         }
         if let Some(fragment) = transcription_text(content.get("outputTranscription")) {
-            self.finish_input(out);
             self.output_text.push_str(fragment);
             out.push(Decoded::Event(LiveEvent::OutputTranscript {
                 text: self.output_text.clone(),
@@ -168,9 +168,6 @@ impl GeminiCodec {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if !calls.is_empty() {
-            self.finish_input(out);
-        }
         for call in calls {
             let call_id = call
                 .get("id")

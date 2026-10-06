@@ -162,7 +162,8 @@ fn accumulates_transcripts_and_closes_utterances() {
             is_final: false
         }]
     );
-    // The model answering closes the user's utterance.
+    // The model answering does not close the user's utterance: input
+    // transcription is unordered relative to output.
     let got = decode(
         &mut c,
         &json!({"serverContent": {
@@ -176,10 +177,6 @@ fn accumulates_transcripts_and_closes_utterances() {
     assert_eq!(
         got,
         vec![
-            LiveEvent::InputTranscript {
-                text: "what time".into(),
-                is_final: true
-            },
             LiveEvent::Audio(Bytes::from_static(&[1, 2])),
             LiveEvent::OutputTranscript {
                 text: "It is".into(),
@@ -200,6 +197,10 @@ fn accumulates_transcripts_and_closes_utterances() {
             LiveEvent::OutputTranscript {
                 text: "It is noon".into(),
                 is_final: false
+            },
+            LiveEvent::InputTranscript {
+                text: "what time".into(),
+                is_final: true
             },
             LiveEvent::OutputTranscript {
                 text: "It is noon".into(),
@@ -264,10 +265,6 @@ fn decodes_tool_calls_and_cancellations() {
     assert_eq!(
         got,
         vec![
-            LiveEvent::InputTranscript {
-                text: "time?".into(),
-                is_final: true
-            },
             LiveEvent::ToolCall(ToolCall {
                 call_id: "c1".into(),
                 name: "get_time".into(),
@@ -378,4 +375,42 @@ fn maps_gemini_close_codes() {
     );
     assert_eq!(c.close_error(4402, ""), Some(Error::InsufficientCredits));
     assert_eq!(c.close_error(1000, ""), None);
+}
+
+#[test]
+fn a_late_input_fragment_joins_its_own_utterance() {
+    let mut c = codec(Mode::Relay, TurnDetection::Server);
+    decode(
+        &mut c,
+        &json!({"serverContent": {"inputTranscription": {"text": "what"}}}),
+    );
+    decode(
+        &mut c,
+        &json!({"serverContent": {"outputTranscription": {"text": "It"}}}),
+    );
+    // The rest of the user's words arrive after the model started.
+    decode(
+        &mut c,
+        &json!({"serverContent": {"inputTranscription": {"text": " time"}}}),
+    );
+    let got = decode(&mut c, &json!({"serverContent": {"turnComplete": true}}));
+    assert_eq!(
+        got[0],
+        LiveEvent::InputTranscript {
+            text: "what time".into(),
+            is_final: true
+        }
+    );
+    // The next turn starts a fresh utterance.
+    let got = decode(
+        &mut c,
+        &json!({"serverContent": {"inputTranscription": {"text": "thanks"}}}),
+    );
+    assert_eq!(
+        got,
+        vec![LiveEvent::InputTranscript {
+            text: "thanks".into(),
+            is_final: false
+        }]
+    );
 }
