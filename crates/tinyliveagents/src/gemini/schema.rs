@@ -4,9 +4,15 @@
 //! setup that uses anything else, which ends the whole session before it
 //! starts. Hosts usually generate schemas for richer validators, so every
 //! declaration is cleaned before it is sent: unsupported keywords are dropped,
-//! `$ref`s are inlined from `$defs`/`definitions`, `const` becomes a
-//! one-value `enum`, and a `type` array such as `["string", "null"]` collapses
-//! to its first non-null member with `nullable: true`.
+//! `$ref`s are inlined from `$defs`/`definitions`, and the shapes Gemini
+//! cannot express are rewritten into ones it can:
+//!
+//! - Gemini only accepts string enums, so `enum` values (and a `const`, which
+//!   becomes a one-value `enum`) are converted to strings and the schema's
+//!   `type` becomes `string`, keeping the type and the values consistent.
+//! - A `type` array drops `"null"` in favour of `nullable: true`; a single
+//!   remaining type becomes `type`, several become an `anyOf` of one schema
+//!   per type, so no alternative is lost.
 
 use serde_json::{Map, Value};
 
@@ -92,7 +98,7 @@ fn clean(value: &Value, definitions: &Value, depth: usize) -> Value {
                 }
             }
             "const" => {
-                out.insert("enum".into(), Value::Array(vec![inner.clone()]));
+                out.insert("enum".into(), Value::Array(vec![string_value(inner)]));
             }
             "type" => match inner {
                 Value::Array(types) => {
@@ -100,8 +106,18 @@ fn clean(value: &Value, definitions: &Value, depth: usize) -> Value {
                         .iter()
                         .filter(|t| t.as_str() != Some("null"))
                         .collect();
-                    if let Some(first) = non_null.first() {
-                        out.insert("type".into(), (*first).clone());
+                    match non_null.as_slice() {
+                        [] => {}
+                        [only] => {
+                            out.insert("type".into(), (*only).clone());
+                        }
+                        several => {
+                            let options = several
+                                .iter()
+                                .map(|t| serde_json::json!({ "type": t }))
+                                .collect();
+                            out.insert("anyOf".into(), Value::Array(options));
+                        }
                     }
                     if non_null.len() < types.len() {
                         out.insert("nullable".into(), Value::Bool(true));
@@ -112,15 +128,8 @@ fn clean(value: &Value, definitions: &Value, depth: usize) -> Value {
                 }
             },
             "enum" => {
-                // Gemini only accepts string enums.
                 if let Value::Array(values) = inner {
-                    let values = values
-                        .iter()
-                        .map(|v| match v {
-                            Value::String(_) => v.clone(),
-                            other => Value::String(other.to_string()),
-                        })
-                        .collect();
+                    let values = values.iter().map(string_value).collect();
                     out.insert(key.clone(), Value::Array(values));
                 }
             }
@@ -130,10 +139,23 @@ fn clean(value: &Value, definitions: &Value, depth: usize) -> Value {
             _ => {}
         }
     }
-    if out.contains_key("enum") && !out.contains_key("type") {
+    if out.contains_key("enum") {
+        // Enum values are strings now, so the type must say so; an `anyOf`
+        // built from a type array would contradict them.
         out.insert("type".into(), Value::String("string".into()));
+        if out.get("anyOf").is_some() && !map.contains_key("anyOf") && !map.contains_key("oneOf") {
+            out.remove("anyOf");
+        }
     }
     Value::Object(out)
+}
+
+/// A JSON value as Gemini's string-only enum members accept it.
+fn string_value(value: &Value) -> Value {
+    match value {
+        Value::String(_) => value.clone(),
+        other => Value::String(other.to_string()),
+    }
 }
 
 #[cfg(test)]

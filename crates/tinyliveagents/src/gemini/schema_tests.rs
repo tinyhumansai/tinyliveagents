@@ -70,6 +70,7 @@ fn rewrites_const_one_of_nullable_types_and_enums() {
     let cleaned = clean_schema(&schema);
     let props = &cleaned["properties"];
     assert_eq!(props["kind"], json!({ "enum": ["a"], "type": "string" }));
+    assert_eq!(props["level"]["type"], "string");
     assert_eq!(
         props["maybe"],
         json!({ "type": "string", "nullable": true })
@@ -102,4 +103,50 @@ fn malformed_containers_are_dropped() {
         "enum": "nope"
     }));
     assert_eq!(cleaned, json!({ "type": "object" }));
+}
+
+#[test]
+fn enum_and_const_types_stay_consistent_with_their_values() {
+    let cleaned = clean_schema(&json!({
+        "type": "object",
+        "properties": {
+            "level": { "type": "integer", "enum": [1, 2] },
+            "one": { "const": 1 },
+            "flag": { "const": true, "type": "boolean" },
+            "mixed": { "type": ["integer", "string"], "enum": [1, "a"] }
+        }
+    }));
+    let props = &cleaned["properties"];
+    assert_eq!(
+        props["level"],
+        json!({ "type": "string", "enum": ["1", "2"] })
+    );
+    assert_eq!(props["one"], json!({ "type": "string", "enum": ["1"] }));
+    assert_eq!(props["flag"], json!({ "type": "string", "enum": ["true"] }));
+    assert_eq!(
+        props["mixed"],
+        json!({ "type": "string", "enum": ["1", "a"] })
+    );
+}
+
+#[test]
+fn type_unions_keep_every_alternative() {
+    let cleaned = clean_schema(&json!({
+        "type": "object",
+        "properties": {
+            "either": { "type": ["string", "integer"], "description": "d" },
+            "maybe_either": { "type": ["string", "integer", "null"] },
+            "only_null": { "type": ["null"] }
+        }
+    }));
+    let props = &cleaned["properties"];
+    assert_eq!(
+        props["either"],
+        json!({ "anyOf": [{ "type": "string" }, { "type": "integer" }], "description": "d" })
+    );
+    assert_eq!(
+        props["maybe_either"],
+        json!({ "anyOf": [{ "type": "string" }, { "type": "integer" }], "nullable": true })
+    );
+    assert_eq!(props["only_null"], json!({ "nullable": true }));
 }
