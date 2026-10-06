@@ -1,0 +1,27 @@
+[package]
+name = "tinyliveagents-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runnable examples and live (network) tests for tinyliveagents."
+publish = false
+
+# This crate talks to real providers. It is not a default member, its live
+# tests are `#[ignore]`d and skip when their key is unset, and CI excludes it
+# from coverage, so a plain `cargo test` never touches the network.
+
+[dependencies]
+tinyliveagents = { workspace = true }
+# Examples run a multi-threaded runtime and sleep to pace audio in real time.
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "fs"] }
+# Sarvam's REST TTS synthesizes the spoken question the live tests send, and
+# the relay example mints a TinyHumans ticket over HTTPS.
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true
