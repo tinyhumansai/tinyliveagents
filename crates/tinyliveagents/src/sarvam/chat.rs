@@ -118,6 +118,9 @@ fn tool_spec(tool: &ToolDeclaration) -> Value {
     })
 }
 
+/// The longest SSE line buffered while waiting for its terminator.
+pub(crate) const MAX_SSE_LINE: usize = 1 << 20;
+
 /// Splits a server-sent-event byte stream into `data:` payloads.
 ///
 /// Bytes are buffered until a whole line arrives and only then decoded, so a
@@ -129,18 +132,46 @@ pub(crate) struct SseParser {
 
 impl SseParser {
     /// Feeds bytes and returns every complete `data:` payload.
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Protocol`] when a line grows past [`MAX_SSE_LINE`] bytes.
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
         self.buffer.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
-            let raw: Vec<u8> = self.buffer.drain(..=end).collect();
-            let line = String::from_utf8_lossy(&raw);
-            let line = line.trim_end_matches(['\r', '\n']);
-            if let Some(data) = line.strip_prefix("data:") {
-                out.push(data.trim_start().to_string());
-            }
+        // LF, CRLF and bare CR all end a line. A CR at the very end may be
+        // the first half of a CRLF, so it waits for the next bytes.
+        while let Some(end) = self.buffer.iter().position(|b| *b == b'\n' || *b == b'\r') {
+            let terminator = match (self.buffer[end], self.buffer.get(end + 1)) {
+                (b'\r', Some(b'\n')) => 2,
+                (b'\r', None) => break,
+                _ => 1,
+            };
+            let raw: Vec<u8> = self.buffer.drain(..end + terminator).collect();
+            Self::take_line(&raw[..end], &mut out);
         }
+        if self.buffer.len() > MAX_SSE_LINE {
+            return Err(Error::Protocol(
+                "sarvam chat stream line is too long".into(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Returns the payload of a final line the stream ended without
+    /// terminating.
+    pub(crate) fn finish(&mut self) -> Vec<String> {
+        let raw = std::mem::take(&mut self.buffer);
+        let mut out = Vec::new();
+        Self::take_line(raw.strip_suffix(b"\r").unwrap_or(&raw), &mut out);
         out
+    }
+
+    fn take_line(line: &[u8], out: &mut Vec<String>) {
+        let line = String::from_utf8_lossy(line);
+        if let Some(data) = line.strip_prefix("data:") {
+            out.push(data.trim_start().to_string());
+        }
     }
 }
 
@@ -273,13 +304,26 @@ impl ChatStream {
             match self.bytes.next().await {
                 None => {
                     self.done = true;
-                    return None;
+                    let rest = self.parser.finish();
+                    if rest.is_empty() {
+                        return None;
+                    }
+                    // Hand back the unterminated last line before ending.
+                    self.done = false;
+                    self.bytes = Box::pin(futures_util::stream::empty());
+                    self.queued.extend(rest);
                 }
                 Some(Err(_)) => {
                     self.done = true;
                     return Some(Err(Error::Connect("sarvam chat stream failed".into())));
                 }
-                Some(Ok(bytes)) => self.queued.extend(self.parser.push(&bytes)),
+                Some(Ok(bytes)) => match self.parser.push(&bytes) {
+                    Ok(lines) => self.queued.extend(lines),
+                    Err(error) => {
+                        self.done = true;
+                        return Some(Err(error));
+                    }
+                },
             }
         }
     }

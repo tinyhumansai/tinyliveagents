@@ -330,7 +330,7 @@ fn spawn_turn(
     let ctx = ctx.clone();
     let task = tokio::spawn(async move {
         let sink = TurnSink { id, out };
-        run_turn(&ctx, messages, input, &language, &sink, tools_rx).await;
+        Box::pin(run_turn(&ctx, messages, input, &language, &sink, tools_rx)).await;
         sink.send(TurnMsg::Done).await;
     });
     Turn {
@@ -468,12 +468,24 @@ async fn run_turn(
         let started = if tts_opened {
             chat::start(&ctx.http, &ctx.chat_endpoint, &ctx.api_key, &body).await
         } else {
-            // Open TTS while the model thinks, hiding the connect latency.
-            let (started, opened) = tokio::join!(
-                chat::start(&ctx.http, &ctx.chat_endpoint, &ctx.api_key, &body),
-                open_tts(ctx, language, sink)
-            );
-            tts = opened;
+            // Open TTS while the model thinks, hiding the connect latency. A
+            // failed request ends the turn at once instead of waiting for TTS.
+            let chat_start = chat::start(&ctx.http, &ctx.chat_endpoint, &ctx.api_key, &body);
+            let tts_open = open_tts(ctx, language, sink);
+            tokio::pin!(chat_start, tts_open);
+            let mut opened = None;
+            let started = loop {
+                tokio::select! {
+                    started = &mut chat_start => {
+                        if started.is_ok() && opened.is_none() {
+                            opened = Some(tts_open.as_mut().await);
+                        }
+                        break started;
+                    }
+                    stream = &mut tts_open, if opened.is_none() => opened = Some(stream),
+                }
+            };
+            tts = opened.flatten();
             tts_opened = true;
             started
         };

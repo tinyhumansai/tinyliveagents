@@ -60,9 +60,12 @@ fn builds_the_request_body() {
 #[test]
 fn parses_sse_across_chunk_boundaries() {
     let mut parser = SseParser::default();
-    assert!(parser.push(b"data: {\"a\"").is_empty(), "expected nothing");
+    assert!(
+        parser.push(b"data: {\"a\"").unwrap().is_empty(),
+        "expected nothing"
+    );
     assert_eq!(
-        parser.push(b":1}\r\n\r\n: comment\ndata:[DONE]\n"),
+        parser.push(b":1}\r\n\r\n: comment\ndata:[DONE]\n").unwrap(),
         vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]
     );
 }
@@ -194,9 +197,12 @@ fn sse_keeps_utf8_split_across_chunks() {
     let line = "data: {\"t\":\"नमस्ते\"}\n".as_bytes();
     // Split inside the first multi-byte character.
     let cut = line.iter().position(|b| *b >= 0x80).unwrap() + 1;
-    assert!(parser.push(&line[..cut]).is_empty(), "expected nothing");
+    assert!(
+        parser.push(&line[..cut]).unwrap().is_empty(),
+        "expected nothing"
+    );
     assert_eq!(
-        parser.push(&line[cut..]),
+        parser.push(&line[cut..]).unwrap(),
         vec!["{\"t\":\"नमस्ते\"}".to_string()]
     );
 }
@@ -208,4 +214,48 @@ fn tracks_finish_reasons() {
     assert!(!acc.finished());
     acc.apply(&json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}));
     assert!(acc.finished());
+}
+
+#[test]
+fn sse_accepts_cr_and_crlf_and_flushes_an_unterminated_line() {
+    let mut parser = SseParser::default();
+    assert_eq!(
+        parser.push(b"data: a\r\rdata: b\r\ndata: c\r").unwrap(),
+        vec!["a".to_string(), "b".to_string()]
+    );
+    // The trailing CR may start a CRLF: it resolves with the next bytes.
+    assert_eq!(parser.push(b"\ndata: d").unwrap(), vec!["c".to_string()]);
+    assert_eq!(parser.finish(), vec!["d".to_string()]);
+    assert!(parser.finish().is_empty(), "expected nothing");
+}
+
+#[test]
+fn sse_refuses_an_unbounded_line() {
+    let mut parser = SseParser::default();
+    let long = vec![b'x'; MAX_SSE_LINE + 1];
+    assert!(matches!(parser.push(&long), Err(Error::Protocol(_))));
+}
+
+#[tokio::test]
+async fn a_stream_without_a_final_newline_keeps_its_last_chunk() {
+    let body = format!("data: {}", text_chunk("tail"));
+    let server = MockHttp::start(vec![(200, body)]).await;
+    let http = reqwest::Client::new();
+    let mut stream = start(&http, &server.url, "k", &json!({})).await.unwrap();
+    let mut acc = ChatAccumulator::default();
+    while let Some(chunk) = stream.next().await {
+        acc.apply(&chunk.unwrap());
+    }
+    assert_eq!(acc.text, "tail");
+    assert!(!stream.completed());
+}
+
+#[tokio::test]
+async fn an_oversized_line_ends_the_stream_with_an_error() {
+    let body = "x".repeat(MAX_SSE_LINE + 10);
+    let server = MockHttp::start(vec![(200, body)]).await;
+    let http = reqwest::Client::new();
+    let mut stream = start(&http, &server.url, "k", &json!({})).await.unwrap();
+    assert!(matches!(stream.next().await, Some(Err(Error::Protocol(_)))));
+    assert!(stream.next().await.is_none());
 }
