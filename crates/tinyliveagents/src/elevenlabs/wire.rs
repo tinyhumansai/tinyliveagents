@@ -9,11 +9,14 @@
 //! `client_tool_call` and `error`. Anything else (`vad_score`,
 //! `internal_*`, ...) is ignored.
 //!
-//! ElevenLabs reports the agent's reply text once, when the reply starts, so
-//! [`LiveEvent::OutputTranscript`] events from this codec are always final;
-//! a correction after barge-in replaces it with the text actually spoken.
-//! There is no turn-complete frame, so this codec never emits
-//! [`LiveEvent::TurnComplete`].
+//! ElevenLabs reports the agent's reply text once, when the reply starts, and
+//! after a barge-in sends `agent_response_correction` with the text actually
+//! spoken. So a reply is first emitted as a *partial*
+//! [`LiveEvent::OutputTranscript`] and becomes final only when it can no
+//! longer change: on its correction, or when the next user utterance or agent
+//! reply begins. Hosts that persist final transcripts therefore keep exactly
+//! one version of each reply. There is no turn-complete frame, so this codec
+//! never emits [`LiveEvent::TurnComplete`].
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -114,6 +117,8 @@ pub(crate) struct ElevenLabsCodec {
     host_input: AudioFormat,
     agent_input: AgentFormat,
     agent_output: AgentFormat,
+    /// The latest agent reply, still open to an `agent_response_correction`.
+    pending_reply: Option<String>,
 }
 
 impl ElevenLabsCodec {
@@ -123,6 +128,7 @@ impl ElevenLabsCodec {
             host_input: config.input_format,
             agent_input: AgentFormat::Pcm(DEFAULT_SAMPLE_RATE),
             agent_output: AgentFormat::Pcm(DEFAULT_SAMPLE_RATE),
+            pending_reply: None,
         }
     }
 
@@ -157,6 +163,67 @@ impl ElevenLabsCodec {
             input_format: self.host_input,
             output_format: AudioFormat::pcm16(output.rate()),
         })
+    }
+}
+
+impl ElevenLabsCodec {
+    /// Transcript frames, with replies held open until they settle.
+    fn decode_transcript(&mut self, kind: &str, value: &Value) -> Vec<Decoded> {
+        let mut out = Vec::new();
+        match kind {
+            "agent_response" => {
+                let text = str_at(value, "/agent_response_event/agent_response")
+                    .unwrap_or_default()
+                    .to_string();
+                self.settle_reply(&mut out);
+                self.pending_reply = Some(text.clone());
+                out.push(Decoded::Event(LiveEvent::OutputTranscript {
+                    text,
+                    is_final: false,
+                }));
+            }
+            "agent_response_correction" => {
+                // The correction replaces the open reply rather than adding a
+                // second one.
+                self.pending_reply = None;
+                let text = str_at(
+                    value,
+                    "/agent_response_correction_event/corrected_agent_response",
+                )
+                .unwrap_or_default()
+                .to_string();
+                out.push(Decoded::Event(LiveEvent::OutputTranscript {
+                    text,
+                    is_final: true,
+                }));
+            }
+            _ => {
+                let text = str_at(value, "/user_transcription_event/user_transcript")
+                    .or_else(|| {
+                        str_at(value, "/tentative_user_transcription_event/user_transcript")
+                    })
+                    .unwrap_or_default();
+                let is_final = kind == "user_transcript";
+                if is_final {
+                    self.settle_reply(&mut out);
+                }
+                out.push(Decoded::Event(LiveEvent::InputTranscript {
+                    text: text.to_string(),
+                    is_final,
+                }));
+            }
+        }
+        out
+    }
+
+    /// Closes the open agent reply, if any, as a final transcript.
+    fn settle_reply(&mut self, out: &mut Vec<Decoded>) {
+        if let Some(text) = self.pending_reply.take() {
+            out.push(Decoded::Event(LiveEvent::OutputTranscript {
+                text,
+                is_final: true,
+            }));
+        }
     }
 }
 
@@ -229,35 +296,10 @@ impl WireCodec for ElevenLabsCodec {
                     AgentFormat::Ulaw8k => ulaw_to_pcm16(&audio),
                 })
             }
-            "user_transcript" | "tentative_user_transcript" => {
-                let text = str_at(&value, "/user_transcription_event/user_transcript")
-                    .or_else(|| {
-                        str_at(
-                            &value,
-                            "/tentative_user_transcription_event/user_transcript",
-                        )
-                    })
-                    .unwrap_or_default();
-                LiveEvent::InputTranscript {
-                    text: text.to_string(),
-                    is_final: kind == "user_transcript",
-                }
-            }
-            "agent_response" => LiveEvent::OutputTranscript {
-                text: str_at(&value, "/agent_response_event/agent_response")
-                    .unwrap_or_default()
-                    .to_string(),
-                is_final: true,
-            },
-            "agent_response_correction" => LiveEvent::OutputTranscript {
-                text: str_at(
-                    &value,
-                    "/agent_response_correction_event/corrected_agent_response",
-                )
-                .unwrap_or_default()
-                .to_string(),
-                is_final: true,
-            },
+            "user_transcript"
+            | "tentative_user_transcript"
+            | "agent_response"
+            | "agent_response_correction" => return Ok(self.decode_transcript(kind, &value)),
             "interruption" => LiveEvent::Interrupted,
             "ping" => {
                 let event_id = value

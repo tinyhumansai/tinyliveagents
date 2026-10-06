@@ -68,7 +68,7 @@ fn initiation_sends_only_what_is_set() {
 fn opens_with_the_initiation_frame() {
     let mut codec = ElevenLabsCodec::new(&LiveConfig::new().with_voice("v"));
     let (frames, events) = codec.on_open();
-    assert!(events.is_empty());
+    assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         text_of(&frames[0])["conversation_config_override"]["tts"]["voice_id"],
         "v"
@@ -143,9 +143,18 @@ fn encodes_commands() {
         text_of(&codec.encode(ClientCommand::ActivityStart)[0]),
         json!({"type": "user_activity"})
     );
-    assert!(codec.encode(ClientCommand::ActivityEnd).is_empty());
-    assert!(codec.encode(ClientCommand::Interrupt).is_empty());
-    assert!(codec.encode(ClientCommand::Close).is_empty());
+    assert!(
+        codec.encode(ClientCommand::ActivityEnd).is_empty(),
+        "expected nothing"
+    );
+    assert!(
+        codec.encode(ClientCommand::Interrupt).is_empty(),
+        "expected nothing"
+    );
+    assert!(
+        codec.encode(ClientCommand::Close).is_empty(),
+        "expected nothing"
+    );
 }
 
 #[test]
@@ -185,7 +194,7 @@ fn decodes_server_events() {
         ),
         LiveEvent::OutputTranscript {
             text: "Noon.".into(),
-            is_final: true
+            is_final: false
         }
     );
     assert_eq!(
@@ -230,7 +239,10 @@ fn decodes_server_events() {
             fatal: false
         }
     );
-    assert!(decode(&mut codec, &json!({"type": "vad_score"})).is_empty());
+    assert!(
+        decode(&mut codec, &json!({"type": "vad_score"})).is_empty(),
+        "expected nothing"
+    );
 }
 
 #[test]
@@ -242,7 +254,7 @@ fn answers_pings_with_pongs() {
     );
     match &reply[0] {
         Decoded::Reply(frame) => assert_eq!(text_of(frame), json!({"type": "pong", "event_id": 9})),
-        other => panic!("expected a reply, got {other:?}"),
+        Decoded::Event(event) => panic!("expected a reply, got {event:?}"),
     }
 }
 
@@ -317,6 +329,72 @@ fn audio_from_an_unsupported_host_rate_is_dropped() {
     assert!(
         codec
             .encode(ClientCommand::Audio(Bytes::from_static(&[0; 8])))
-            .is_empty()
+            .is_empty(),
+        "expected nothing"
+    );
+}
+
+fn events(codec: &mut ElevenLabsCodec, value: &Value) -> Vec<LiveEvent> {
+    decode(codec, value)
+        .into_iter()
+        .map(|d| match d {
+            Decoded::Event(e) => e,
+            Decoded::Reply(r) => panic!("unexpected reply {r:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_reply_is_final_once_it_can_no_longer_change() {
+    let reply = |text: &str| json!({"type": "agent_response", "agent_response_event": {"agent_response": text}});
+    let heard = |text: &str| json!({"type": "user_transcript", "user_transcription_event": {"user_transcript": text}});
+    let partial = |text: &str| LiveEvent::OutputTranscript {
+        text: text.into(),
+        is_final: false,
+    };
+    let fin = |text: &str| LiveEvent::OutputTranscript {
+        text: text.into(),
+        is_final: true,
+    };
+    let mut codec = ElevenLabsCodec::new(&LiveConfig::new());
+
+    // A reply that is corrected after barge-in: only the correction is final.
+    assert_eq!(
+        events(&mut codec, &reply("It is two o'clock and")),
+        vec![partial("It is two o'clock and")]
+    );
+    assert_eq!(
+        events(
+            &mut codec,
+            &json!({"type": "agent_response_correction", "agent_response_correction_event": {"corrected_agent_response": "It is two"}})
+        ),
+        vec![fin("It is two")]
+    );
+    // The next user utterance has nothing left to settle.
+    assert_eq!(
+        events(&mut codec, &heard("thanks")),
+        vec![LiveEvent::InputTranscript {
+            text: "thanks".into(),
+            is_final: true
+        }]
+    );
+
+    // An uncorrected reply settles when the user speaks next...
+    events(&mut codec, &reply("You're welcome."));
+    assert_eq!(
+        events(&mut codec, &heard("bye")),
+        vec![
+            fin("You're welcome."),
+            LiveEvent::InputTranscript {
+                text: "bye".into(),
+                is_final: true
+            }
+        ]
+    );
+    // ...or when another reply starts.
+    events(&mut codec, &reply("One."));
+    assert_eq!(
+        events(&mut codec, &reply("Two.")),
+        vec![fin("One."), partial("Two.")]
     );
 }

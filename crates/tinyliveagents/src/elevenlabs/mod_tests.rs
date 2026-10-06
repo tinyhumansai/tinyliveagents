@@ -1,7 +1,9 @@
 //! End-to-end tests for the ElevenLabs provider against a mock agent.
 
 use super::*;
-use crate::testkit::{MockServer, close_with, collect_events, next_event, next_json, send_json};
+use crate::test_support::{
+    MockServer, close_with, collect_events, next_event, next_json, send_json,
+};
 use crate::types::{CloseReason, ToolResult};
 use crate::{LiveEvent, ToolDeclaration};
 use serde_json::json;
@@ -109,7 +111,8 @@ async fn agent_target_validates_its_inputs() {
         Err(Error::InvalidConfig(_))
     ));
     // `with_endpoint` is a no-op for signed URLs.
-    let signed = ElevenLabsConvai::connect_url("ws://127.0.0.1:9").with_endpoint("ws://x");
+    let signed = ElevenLabsConvai::connect_url(crate::test_support::closed_url("ws").await)
+        .with_endpoint("ws://x");
     assert!(matches!(
         signed.connect(LiveConfig::new()).await,
         Err(Error::Connect(_))
