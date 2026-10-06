@@ -108,6 +108,9 @@ impl Drop for TaskGuard {
 #[derive(Debug)]
 pub struct LiveEvents {
     rx: mpsc::Receiver<LiveEvent>,
+    /// An event read ahead of the host (the `Ready` a provider waited for
+    /// before returning from `connect`), delivered before anything else.
+    pending: Option<LiveEvent>,
     task: TaskGuard,
 }
 
@@ -115,6 +118,9 @@ impl LiveEvents {
     /// The next event, or `None` after [`LiveEvent::Closed`] has been
     /// delivered and the provider task has ended.
     pub async fn recv(&mut self) -> Option<LiveEvent> {
+        if let Some(event) = self.pending.take() {
+            return Some(event);
+        }
         self.rx.recv().await
     }
 
@@ -124,6 +130,9 @@ impl LiveEvents {
     ///
     /// [`Error::Timeout`] when nothing arrives in time.
     pub async fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<LiveEvent>> {
+        if let Some(event) = self.pending.take() {
+            return Ok(Some(event));
+        }
         tokio::time::timeout(timeout, self.rx.recv())
             .await
             .map_err(|_| Error::Timeout)
@@ -150,6 +159,7 @@ impl LiveSession {
             sender: LiveSender { tx: commands },
             events: LiveEvents {
                 rx: events,
+                pending: None,
                 task: TaskGuard(None),
             },
         }
@@ -182,7 +192,44 @@ impl LiveSession {
     }
 }
 
+/// How long a provider may take to accept a session's setup.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
+pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Waits for `session`'s first event and returns the session only once it is
+/// [`LiveEvent::Ready`], which stays queued for the host. Anything else before
+/// `Ready` means the provider refused the setup.
+///
+/// # Errors
+///
+/// The error a pre-ready `Error` or `Closed` event carries,
+/// [`Error::Provider`] for a normal close before `Ready`, and
+/// [`Error::Timeout`] when nothing arrives within `timeout`.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
+pub(crate) async fn await_ready(
+    mut session: LiveSession,
+    timeout: Duration,
+) -> Result<LiveSession> {
+    use crate::types::CloseReason;
+    match tokio::time::timeout(timeout, session.events.rx.recv()).await {
+        Err(_) => Err(Error::Timeout),
+        Ok(None) => Err(Error::Closed),
+        Ok(Some(event @ LiveEvent::Ready(_))) => {
+            session.events.pending = Some(event);
+            Ok(session)
+        }
+        Ok(Some(LiveEvent::Error { error, .. } | LiveEvent::Closed(CloseReason::Error(error)))) => {
+            Err(error)
+        }
+        Ok(Some(LiveEvent::Closed(CloseReason::Remote { code, reason }))) => Err(Error::Provider(
+            format!("closed before the session was ready (code {code:?}): {reason}"),
+        )),
+        Ok(Some(_)) => Err(Error::Protocol("the first event was not ready".into())),
+    }
+}
+
 /// The provider-side ends of a fresh session's channels.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 #[derive(Debug)]
 pub(crate) struct SessionChannels {
     pub(crate) commands: mpsc::Receiver<ClientCommand>,
@@ -190,6 +237,7 @@ pub(crate) struct SessionChannels {
 }
 
 /// Creates a session and the provider-side channel ends that drive it.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 pub(crate) fn session_pair() -> (LiveSession, SessionChannels) {
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (ev_tx, ev_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -203,11 +251,13 @@ pub(crate) fn session_pair() -> (LiveSession, SessionChannels) {
 }
 
 /// Where a provider task writes events.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 #[derive(Debug, Clone)]
 pub(crate) struct EventSink {
     tx: mpsc::Sender<LiveEvent>,
 }
 
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 impl EventSink {
     /// Delivers an event. Returns `false` when the host dropped the stream, in
     /// which case the provider task should stop.
@@ -216,6 +266,9 @@ impl EventSink {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "gemini", feature = "elevenlabs", feature = "sarvam")
+))]
 #[path = "mod_tests.rs"]
 mod tests;

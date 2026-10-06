@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::provider::{LiveProvider, validate_common};
-use crate::session::{LiveSession, session_pair};
+use crate::session::{LiveSession, READY_TIMEOUT, await_ready, session_pair};
 use crate::transport::connect;
 use crate::types::{AudioFormat, Capabilities, LiveConfig, SessionInfo};
 
@@ -168,13 +168,14 @@ impl LiveProvider for SarvamCascade {
         });
         tracing::debug!(provider = "sarvam", "tinyliveagents: connected");
         let (session, channels) = session_pair();
-        Ok(session.with_task(tokio::spawn(cascade::run(
+        let session = session.with_task(tokio::spawn(cascade::run(
             socket,
             ctx,
             channels,
             info,
             first_message,
-        ))))
+        )));
+        await_ready(session, READY_TIMEOUT).await
     }
 }
 

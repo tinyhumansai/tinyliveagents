@@ -86,12 +86,10 @@ async fn agent_target_sends_the_key_header_and_agent_id() {
     .await;
     let provider = ElevenLabsConvai::agent("agent-7", "xi-key").with_endpoint(server.url.clone());
     assert!(!format!("{provider:?}").contains("xi-key"));
-    let mut session = provider.connect(LiveConfig::new()).await.unwrap();
-    let events = collect_events(&mut session).await;
-    assert!(matches!(
-        events.last(),
-        Some(LiveEvent::Closed(CloseReason::Error(Error::Provider(_))))
-    ));
+    // A refused override closes the socket before the session is ready, so
+    // `connect` itself reports it.
+    let result = provider.connect(LiveConfig::new()).await;
+    assert!(matches!(result, Err(Error::Provider(_))), "{result:?}");
     server.finish().await;
 }
 

@@ -21,7 +21,7 @@ use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::provider::{LiveProvider, validate_common};
-use crate::session::{LiveSession, session_pair};
+use crate::session::{LiveSession, READY_TIMEOUT, await_ready, session_pair};
 use crate::transport::{connect, drive};
 use crate::types::{Capabilities, LiveConfig};
 
@@ -107,7 +107,15 @@ impl LiveProvider for GeminiLive {
         );
         tracing::debug!(provider = "gemini", "tinyliveagents: connected");
         let (session, channels) = session_pair();
-        Ok(session.with_task(tokio::spawn(drive(socket, codec, channels))))
+        await_ready(
+            session.with_task(tokio::spawn(drive(
+                Box::new(socket),
+                Box::new(codec),
+                channels,
+            ))),
+            READY_TIMEOUT,
+        )
+        .await
     }
 }
 
@@ -176,7 +184,15 @@ impl LiveProvider for GeminiRelay {
         );
         tracing::debug!(provider = "gemini-relay", "tinyliveagents: connected");
         let (session, channels) = session_pair();
-        Ok(session.with_task(tokio::spawn(drive(socket, codec, channels))))
+        await_ready(
+            session.with_task(tokio::spawn(drive(
+                Box::new(socket),
+                Box::new(codec),
+                channels,
+            ))),
+            READY_TIMEOUT,
+        )
+        .await
     }
 }
 

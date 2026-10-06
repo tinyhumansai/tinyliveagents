@@ -71,17 +71,11 @@
         clippy::type_complexity
     )
 )]
-// With no provider enabled only the vocabulary is useful; the shared plumbing
-// the providers build on is unused.
-#![cfg_attr(
-    not(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam")),
-    allow(dead_code)
-)]
-
 pub mod audio;
 mod error;
 mod provider;
 mod session;
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 mod transport;
 mod types;
 
@@ -92,7 +86,10 @@ pub mod gemini;
 #[cfg(feature = "sarvam")]
 pub mod sarvam;
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "gemini", feature = "elevenlabs", feature = "sarvam")
+))]
 mod testkit;
 
 pub use error::{Error, Result};

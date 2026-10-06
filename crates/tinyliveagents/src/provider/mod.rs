@@ -38,6 +38,7 @@ pub trait LiveProvider: Send + Sync + std::fmt::Debug {
 ///
 /// [`crate::Error::InvalidConfig`] when the input rate is not one the provider
 /// accepts or a tool declaration has an empty name.
+#[cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
 pub(crate) fn validate_common(config: &LiveConfig, capabilities: &Capabilities) -> Result<()> {
     if !capabilities.accepts_input_rate(config.input_format.sample_rate) {
         return Err(crate::Error::InvalidConfig(format!(
@@ -58,6 +59,9 @@ pub(crate) fn validate_common(config: &LiveConfig, capabilities: &Capabilities) 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "gemini", feature = "elevenlabs", feature = "sarvam")
+))]
 #[path = "mod_tests.rs"]
 mod tests;

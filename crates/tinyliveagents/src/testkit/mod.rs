@@ -5,8 +5,6 @@
 //! path, query and headers a provider sent, then play the provider's side of
 //! the protocol frame by frame.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -179,6 +177,7 @@ pub(crate) async fn next_event(session: &mut crate::LiveSession) -> crate::LiveE
         .expect("session ended")
 }
 
+#[cfg(feature = "sarvam")]
 /// A sequential mock HTTP server: answers the `n`th request with the `n`th
 /// canned response and records every request body as JSON.
 pub(crate) struct MockHttp {
@@ -187,6 +186,7 @@ pub(crate) struct MockHttp {
     pub(crate) headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
 }
 
+#[cfg(feature = "sarvam")]
 impl MockHttp {
     /// Serves `responses` (status, body) in order, one connection each.
     pub(crate) async fn start(responses: Vec<(u16, String)>) -> Self {
@@ -253,6 +253,7 @@ impl MockHttp {
     }
 }
 
+#[cfg(feature = "sarvam")]
 /// An SSE body carrying `chunks` and the `[DONE]` sentinel.
 pub(crate) fn sse(chunks: &[Value]) -> String {
     let mut out = String::new();
@@ -265,11 +266,13 @@ pub(crate) fn sse(chunks: &[Value]) -> String {
     out
 }
 
+#[cfg(feature = "sarvam")]
 /// A chat chunk carrying text.
 pub(crate) fn text_chunk(text: &str) -> Value {
     serde_json::json!({ "choices": [{ "delta": { "content": text }, "index": 0 }] })
 }
 
+#[cfg(feature = "sarvam")]
 /// A chat chunk carrying one whole tool call.
 pub(crate) fn tool_chunk(id: &str, name: &str, args: &str) -> Value {
     serde_json::json!({ "choices": [{ "delta": { "tool_calls": [

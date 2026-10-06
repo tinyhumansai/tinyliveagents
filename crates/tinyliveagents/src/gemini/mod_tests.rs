@@ -110,20 +110,36 @@ async fn direct_rejects_an_empty_key_and_bad_config() {
 }
 
 #[tokio::test]
-async fn direct_reports_an_invalid_setup_close() {
+async fn direct_fails_connect_when_setup_is_refused() {
     let server = MockServer::start(|mut ws, _| async move {
         let _ = next_json(&mut ws).await;
         close_with(&mut ws, 1007, "Request contains an invalid argument").await;
     })
     .await;
     let provider = GeminiLive::new("k").with_endpoint(server.url.clone());
-    let mut session = provider.connect(LiveConfig::new()).await.unwrap();
-    let events = collect_events(&mut session).await;
+    let result = provider.connect(LiveConfig::new()).await;
     assert_eq!(
-        events.last(),
-        Some(&LiveEvent::Closed(CloseReason::Error(
-            Error::InvalidConfig("Request contains an invalid argument".into())
-        )))
+        result.err(),
+        Some(Error::InvalidConfig(
+            "Request contains an invalid argument".into()
+        ))
+    );
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn direct_fails_connect_on_a_pre_ready_error_frame() {
+    let server = MockServer::start(|mut ws, _| async move {
+        let _ = next_json(&mut ws).await;
+        send_json(&mut ws, json!({"error": {"message": "model not found"}})).await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let provider = GeminiLive::new("k").with_endpoint(server.url.clone());
+    let result = provider.connect(LiveConfig::new()).await;
+    assert_eq!(
+        result.err(),
+        Some(Error::Provider("model not found".into()))
     );
     server.finish().await;
 }
