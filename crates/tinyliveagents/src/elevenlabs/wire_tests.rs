@@ -22,11 +22,14 @@ fn event(codec: &mut ElevenLabsCodec, value: &Value) -> LiveEvent {
 }
 
 #[test]
-fn parses_pcm_rates() {
-    assert_eq!(pcm_rate("pcm_16000"), Some(16_000));
-    assert_eq!(pcm_rate("pcm_44100"), Some(44_100));
-    assert_eq!(pcm_rate("ulaw_8000"), None);
-    assert_eq!(pcm_rate("pcm_x"), None);
+fn parses_agent_formats() {
+    assert_eq!(parse_format("pcm_16000"), Some(AgentFormat::Pcm(16_000)));
+    assert_eq!(parse_format("pcm_44100"), Some(AgentFormat::Pcm(44_100)));
+    assert_eq!(parse_format("ulaw_8000"), Some(AgentFormat::Ulaw8k));
+    assert_eq!(AgentFormat::Ulaw8k.rate(), 8_000);
+    assert_eq!(parse_format("pcm_x"), None);
+    assert_eq!(parse_format("pcm_1"), None);
+    assert_eq!(parse_format("mp3_44100"), None);
 }
 
 #[test]
@@ -252,4 +255,68 @@ fn rejects_non_json_and_bad_audio() {
         codec.decode(bad.to_string().as_bytes()),
         Err(Error::Protocol(_))
     ));
+}
+
+#[test]
+fn ulaw_agents_are_transcoded_both_ways() {
+    let mut codec = ElevenLabsCodec::new(&LiveConfig::new());
+    let LiveEvent::Ready(info) = event(
+        &mut codec,
+        &json!({
+            "type": "conversation_initiation_metadata",
+            "conversation_initiation_metadata_event": {
+                "agent_output_audio_format": "ulaw_8000",
+                "user_input_audio_format": "ulaw_8000"
+            }
+        }),
+    ) else {
+        panic!("expected ready")
+    };
+    assert_eq!(info.output_format.sample_rate, 8_000);
+
+    // Two μ-law bytes (silence) become two PCM16 samples.
+    let audio = event(
+        &mut codec,
+        &json!({"type": "audio", "audio_event": {"audio_base_64": B64.encode([0xFF_u8, 0xFF])}}),
+    );
+    assert_eq!(audio, LiveEvent::Audio(Bytes::from_static(&[0, 0, 0, 0])));
+
+    // Four 16 kHz PCM samples become two 8 kHz μ-law bytes.
+    let frame = codec.encode(ClientCommand::Audio(Bytes::from_static(&[0; 8])));
+    let chunk = text_of(&frame[0])["user_audio_chunk"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(B64.decode(chunk).unwrap(), vec![0xFF, 0xFF]);
+}
+
+#[test]
+fn unsupported_agent_formats_fail_the_session() {
+    let mut codec = ElevenLabsCodec::new(&LiveConfig::new());
+    let failed = event(
+        &mut codec,
+        &json!({
+            "type": "conversation_initiation_metadata",
+            "conversation_initiation_metadata_event": {"agent_output_audio_format": "mp3_44100"}
+        }),
+    );
+    assert_eq!(
+        failed,
+        LiveEvent::Error {
+            error: Error::InvalidConfig("unsupported elevenlabs audio format mp3_44100".into()),
+            fatal: true
+        }
+    );
+}
+
+#[test]
+fn audio_from_an_unsupported_host_rate_is_dropped() {
+    let mut config = LiveConfig::new();
+    config.input_format = AudioFormat::pcm16(1_000);
+    let mut codec = ElevenLabsCodec::new(&config);
+    assert!(
+        codec
+            .encode(ClientCommand::Audio(Bytes::from_static(&[0; 8])))
+            .is_empty()
+    );
 }

@@ -21,7 +21,9 @@ use bytes::Bytes;
 use serde_json::{Map, Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::audio::resample_pcm16;
+use crate::audio::{
+    MAX_SAMPLE_RATE, MIN_SAMPLE_RATE, pcm16_to_ulaw, resample_pcm16, ulaw_to_pcm16,
+};
 use crate::error::{Error, Result};
 use crate::transport::{Decoded, WireCodec, json_frame};
 use crate::types::{AudioFormat, ClientCommand, LiveConfig, LiveEvent, SessionInfo, ToolCall};
@@ -29,10 +31,35 @@ use crate::types::{AudioFormat, ClientCommand, LiveConfig, LiveEvent, SessionInf
 /// The rate ElevenLabs agents use unless configured otherwise.
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
-/// Parses an ElevenLabs audio format name (`pcm_16000`) into a sample rate.
-/// Non-PCM formats (`ulaw_8000`) are not supported and yield `None`.
-pub(crate) fn pcm_rate(format: &str) -> Option<u32> {
-    format.strip_prefix("pcm_")?.parse().ok()
+/// An ElevenLabs agent audio format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentFormat {
+    /// PCM16 at this rate (`pcm_16000`, `pcm_24000`, ...).
+    Pcm(u32),
+    /// G.711 μ-law at 8 kHz (`ulaw_8000`); transcoded to and from PCM16.
+    Ulaw8k,
+}
+
+impl AgentFormat {
+    /// The PCM rate the host sees for this format.
+    pub(crate) fn rate(self) -> u32 {
+        match self {
+            Self::Pcm(rate) => rate,
+            Self::Ulaw8k => 8_000,
+        }
+    }
+}
+
+/// Parses an ElevenLabs audio format name. Formats this crate cannot carry
+/// as PCM16 yield `None`.
+pub(crate) fn parse_format(format: &str) -> Option<AgentFormat> {
+    if format == "ulaw_8000" {
+        return Some(AgentFormat::Ulaw8k);
+    }
+    let rate: u32 = format.strip_prefix("pcm_")?.parse().ok()?;
+    (MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE)
+        .contains(&rate)
+        .then_some(AgentFormat::Pcm(rate))
 }
 
 /// Builds the `conversation_initiation_client_data` frame from a config.
@@ -85,7 +112,8 @@ pub fn initiation_message(config: &LiveConfig) -> Value {
 pub(crate) struct ElevenLabsCodec {
     initiation: Value,
     host_input: AudioFormat,
-    agent_input_rate: u32,
+    agent_input: AgentFormat,
+    agent_output: AgentFormat,
 }
 
 impl ElevenLabsCodec {
@@ -93,23 +121,32 @@ impl ElevenLabsCodec {
         Self {
             initiation: initiation_message(config),
             host_input: config.input_format,
-            agent_input_rate: DEFAULT_SAMPLE_RATE,
+            agent_input: AgentFormat::Pcm(DEFAULT_SAMPLE_RATE),
+            agent_output: AgentFormat::Pcm(DEFAULT_SAMPLE_RATE),
+        }
+    }
+
+    /// Reads one format field; a missing one keeps the default, an unknown
+    /// one is an error (its audio would be mislabelled otherwise).
+    fn format_field(metadata: &Value, key: &str) -> Result<AgentFormat> {
+        match metadata.get(key).and_then(Value::as_str) {
+            None => Ok(AgentFormat::Pcm(DEFAULT_SAMPLE_RATE)),
+            Some(name) => parse_format(name).ok_or_else(|| {
+                Error::InvalidConfig(format!("unsupported elevenlabs audio format {name}"))
+            }),
         }
     }
 
     fn ready(&mut self, metadata: &Value) -> LiveEvent {
-        if let Some(rate) = metadata
-            .get("user_input_audio_format")
-            .and_then(Value::as_str)
-            .and_then(pcm_rate)
-        {
-            self.agent_input_rate = rate;
-        }
-        let output_rate = metadata
-            .get("agent_output_audio_format")
-            .and_then(Value::as_str)
-            .and_then(pcm_rate)
-            .unwrap_or(DEFAULT_SAMPLE_RATE);
+        let formats = Self::format_field(metadata, "user_input_audio_format").and_then(|input| {
+            Self::format_field(metadata, "agent_output_audio_format").map(|output| (input, output))
+        });
+        let (input, output) = match formats {
+            Ok(pair) => pair,
+            Err(error) => return LiveEvent::Error { error, fatal: true },
+        };
+        self.agent_input = input;
+        self.agent_output = output;
         LiveEvent::Ready(SessionInfo {
             provider: "elevenlabs".into(),
             session_id: metadata
@@ -118,7 +155,7 @@ impl ElevenLabsCodec {
                 .map(str::to_string),
             model: None,
             input_format: self.host_input,
-            output_format: AudioFormat::pcm16(output_rate),
+            output_format: AudioFormat::pcm16(output.rate()),
         })
     }
 }
@@ -135,8 +172,22 @@ impl WireCodec for ElevenLabsCodec {
     fn encode(&mut self, command: ClientCommand) -> Vec<Message> {
         let frame = match command {
             ClientCommand::Audio(pcm) => {
-                let pcm = resample_pcm16(&pcm, self.host_input.sample_rate, self.agent_input_rate);
-                json!({ "user_audio_chunk": B64.encode(&pcm) })
+                let pcm = match resample_pcm16(
+                    &pcm,
+                    self.host_input.sample_rate,
+                    self.agent_input.rate(),
+                ) {
+                    Ok(pcm) => pcm,
+                    Err(error) => {
+                        tracing::debug!(%error, "tinyliveagents: dropping unresamplable audio");
+                        return Vec::new();
+                    }
+                };
+                let wire = match self.agent_input {
+                    AgentFormat::Pcm(_) => pcm,
+                    AgentFormat::Ulaw8k => pcm16_to_ulaw(&pcm),
+                };
+                json!({ "user_audio_chunk": B64.encode(&wire) })
             }
             ClientCommand::Text(text) => json!({ "type": "user_message", "text": text }),
             ClientCommand::ToolResult(result) => json!({
@@ -173,7 +224,10 @@ impl WireCodec for ElevenLabsCodec {
                 let audio = B64
                     .decode(data)
                     .map_err(|_| Error::Protocol("audio event is not base64".into()))?;
-                LiveEvent::Audio(Bytes::from(audio))
+                LiveEvent::Audio(match self.agent_output {
+                    AgentFormat::Pcm(_) => Bytes::from(audio),
+                    AgentFormat::Ulaw8k => ulaw_to_pcm16(&audio),
+                })
             }
             "user_transcript" | "tentative_user_transcript" => {
                 let text = str_at(&value, "/user_transcription_event/user_transcript")

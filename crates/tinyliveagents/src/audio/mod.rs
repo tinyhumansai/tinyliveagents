@@ -5,9 +5,20 @@
 //! Sarvam at the rate requested. A host that plays audio at one rate, or a
 //! provider adapter that must hand a chained stage a fixed rate, uses
 //! [`resample_pcm16`]. The resampler is linear interpolation: cheap, allocation
-//! bounded, and plenty for speech. Nothing here does I/O.
+//! bounded, and plenty for speech. Telephony-style agents (ElevenLabs with
+//! `ulaw_8000`) speak G.711 μ-law, so [`ulaw_to_pcm16`] and [`pcm16_to_ulaw`]
+//! convert it. Nothing here does I/O.
 
 use bytes::Bytes;
+
+use crate::error::{Error, Result};
+
+/// The lowest sample rate [`resample_pcm16`] accepts.
+pub const MIN_SAMPLE_RATE: u32 = 4_000;
+/// The highest sample rate [`resample_pcm16`] accepts. Bounding both ends caps
+/// the output at 48× the input, so a bogus rate cannot trigger a huge
+/// allocation.
+pub const MAX_SAMPLE_RATE: u32 = 192_000;
 
 /// Decodes PCM16 little-endian bytes into samples. A trailing odd byte is
 /// ignored.
@@ -29,15 +40,26 @@ pub fn samples_to_pcm16(samples: &[i16]) -> Bytes {
 
 /// Resamples PCM16 mono audio from `from_rate` to `to_rate` Hz.
 ///
-/// Returns the input unchanged when the rates match or either is zero.
-#[must_use]
-pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Bytes {
-    if from_rate == to_rate || from_rate == 0 || to_rate == 0 {
-        return bytes.clone();
+/// Returns the input unchanged when the rates match.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when either rate is outside
+/// [`MIN_SAMPLE_RATE`]`..=`[`MAX_SAMPLE_RATE`].
+pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Result<Bytes> {
+    if from_rate == to_rate {
+        return Ok(bytes.clone());
+    }
+    for rate in [from_rate, to_rate] {
+        if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) {
+            return Err(Error::InvalidConfig(format!(
+                "sample rate {rate} is outside {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE}"
+            )));
+        }
     }
     let input = pcm16_to_samples(bytes);
     if input.is_empty() {
-        return Bytes::new();
+        return Ok(Bytes::new());
     }
     let ratio = f64::from(from_rate) / f64::from(to_rate);
     #[allow(
@@ -65,7 +87,60 @@ pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Bytes {
                 .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16,
         );
     }
-    samples_to_pcm16(&output)
+    Ok(samples_to_pcm16(&output))
+}
+
+/// Decodes G.711 μ-law bytes into PCM16 little-endian bytes (one sample per
+/// byte, same rate).
+#[must_use]
+pub fn ulaw_to_pcm16(ulaw: &[u8]) -> Bytes {
+    let samples: Vec<i16> = ulaw.iter().map(|byte| ulaw_decode(*byte)).collect();
+    samples_to_pcm16(&samples)
+}
+
+/// Encodes PCM16 little-endian bytes as G.711 μ-law (same rate).
+#[must_use]
+pub fn pcm16_to_ulaw(pcm16: &[u8]) -> Bytes {
+    pcm16_to_samples(pcm16)
+        .into_iter()
+        .map(ulaw_encode)
+        .collect::<Vec<u8>>()
+        .into()
+}
+
+const ULAW_BIAS: i32 = 0x84;
+const ULAW_CLIP: i32 = 32_635;
+
+fn ulaw_encode(sample: i16) -> u8 {
+    let mut value = i32::from(sample);
+    let sign = if value < 0 {
+        value = -value;
+        0x80
+    } else {
+        0
+    };
+    value = value.min(ULAW_CLIP) + ULAW_BIAS;
+    let mut exponent = 7;
+    let mut mask = 0x4000;
+    while exponent > 0 && value & mask == 0 {
+        exponent -= 1;
+        mask >>= 1;
+    }
+    let mantissa = (value >> (exponent + 3)) & 0x0F;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let encoded = !(sign | (exponent << 4) | mantissa) as u8;
+    encoded
+}
+
+fn ulaw_decode(byte: u8) -> i16 {
+    let byte = i32::from(!byte);
+    let sign = byte & 0x80;
+    let exponent = (byte >> 4) & 0x07;
+    let mantissa = byte & 0x0F;
+    let magnitude = (((mantissa << 3) + ULAW_BIAS) << exponent) - ULAW_BIAS;
+    #[allow(clippy::cast_possible_truncation)]
+    let sample = if sign == 0 { magnitude } else { -magnitude } as i16;
+    sample
 }
 
 /// Milliseconds of audio in `byte_len` bytes of PCM16 mono at `sample_rate`.
