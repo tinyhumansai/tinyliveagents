@@ -15,8 +15,9 @@
 //! [`LiveEvent::OutputTranscript`] and becomes final only when it can no
 //! longer change: on its correction, or when the next user utterance or agent
 //! reply begins. Hosts that persist final transcripts therefore keep exactly
-//! one version of each reply. There is no turn-complete frame, so this codec
-//! never emits [`LiveEvent::TurnComplete`].
+//! one version of each reply. Agents that enable the `agent_response_complete`
+//! client event also get [`LiveEvent::TurnComplete`] (and the reply settles
+//! there); others have no turn boundary to report.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -135,11 +136,12 @@ impl ElevenLabsCodec {
     /// Reads one format field; a missing one keeps the default, an unknown
     /// one is an error (its audio would be mislabelled otherwise).
     fn format_field(metadata: &Value, key: &str) -> Result<AgentFormat> {
-        match metadata.get(key).and_then(Value::as_str) {
-            None => Ok(AgentFormat::Pcm(DEFAULT_SAMPLE_RATE)),
-            Some(name) => parse_format(name).ok_or_else(|| {
+        match metadata.get(key) {
+            None | Some(Value::Null) => Ok(AgentFormat::Pcm(DEFAULT_SAMPLE_RATE)),
+            Some(Value::String(name)) => parse_format(name).ok_or_else(|| {
                 Error::InvalidConfig(format!("unsupported elevenlabs audio format {name}"))
             }),
+            Some(_) => Err(Error::Protocol(format!("{key} is not a string"))),
         }
     }
 
@@ -301,6 +303,14 @@ impl WireCodec for ElevenLabsCodec {
             | "agent_response"
             | "agent_response_correction" => return Ok(self.decode_transcript(kind, &value)),
             "interruption" => LiveEvent::Interrupted,
+            // Sent (when the agent enables it) once the reply, its tools and
+            // its audio are done: the reply is settled and the turn is over.
+            "agent_response_complete" => {
+                let mut out = Vec::new();
+                self.settle_reply(&mut out);
+                out.push(Decoded::Event(LiveEvent::TurnComplete { usage: None }));
+                return Ok(out);
+            }
             "ping" => {
                 let event_id = value
                     .pointer("/ping_event/event_id")

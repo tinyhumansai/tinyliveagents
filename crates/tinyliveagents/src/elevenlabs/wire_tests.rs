@@ -398,3 +398,41 @@ fn a_reply_is_final_once_it_can_no_longer_change() {
         vec![fin("One."), partial("Two.")]
     );
 }
+
+#[test]
+fn response_complete_settles_the_reply_and_ends_the_turn() {
+    let mut codec = ElevenLabsCodec::new(&LiveConfig::new());
+    events(
+        &mut codec,
+        &json!({"type": "agent_response", "agent_response_event": {"agent_response": "Done."}}),
+    );
+    assert_eq!(
+        events(&mut codec, &json!({"type": "agent_response_complete"})),
+        vec![
+            LiveEvent::OutputTranscript {
+                text: "Done.".into(),
+                is_final: true
+            },
+            LiveEvent::TurnComplete { usage: None }
+        ]
+    );
+}
+
+#[test]
+fn non_string_formats_are_protocol_errors() {
+    let mut codec = ElevenLabsCodec::new(&LiveConfig::new());
+    let failed = event(
+        &mut codec,
+        &json!({
+            "type": "conversation_initiation_metadata",
+            "conversation_initiation_metadata_event": {"user_input_audio_format": 16000}
+        }),
+    );
+    assert!(matches!(
+        failed,
+        LiveEvent::Error {
+            error: Error::Protocol(_),
+            fatal: true
+        }
+    ));
+}
