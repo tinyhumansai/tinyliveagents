@@ -60,6 +60,33 @@ pub(crate) fn tool_message(result: &ToolResult) -> Value {
     json!({ "role": "tool", "tool_call_id": result.call_id, "content": content })
 }
 
+/// Answers every tool call of the last assistant message that has no `tool`
+/// message yet with `Error: cancelled`. Chat endpoints reject a history whose
+/// assistant `tool_calls` are not all answered, so a turn interrupted while
+/// tools ran must not leave one behind.
+pub(crate) fn close_dangling_tool_calls(history: &mut Vec<Value>) {
+    let Some(last) = history.iter().rposition(|m| {
+        m.get("role").and_then(Value::as_str) == Some("assistant") && m.get("tool_calls").is_some()
+    }) else {
+        return;
+    };
+    let answered: Vec<&str> = history[last + 1..]
+        .iter()
+        .filter_map(|m| m.get("tool_call_id").and_then(Value::as_str))
+        .collect();
+    let missing: Vec<String> = history[last]["tool_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(Value::as_str))
+        .filter(|id| !answered.contains(id))
+        .map(str::to_string)
+        .collect();
+    for id in missing {
+        history.push(json!({ "role": "tool", "tool_call_id": id, "content": "Error: cancelled" }));
+    }
+}
+
 /// The request body.
 pub(crate) fn request_body(config: &LiveConfig, messages: &[Value]) -> Value {
     let mut body = json!({

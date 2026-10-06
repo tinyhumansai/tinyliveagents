@@ -98,6 +98,15 @@ struct Turn {
     pending_calls: Vec<String>,
 }
 
+impl Drop for Turn {
+    // A turn never outlives its session: when the session task is aborted
+    // (the host dropped the event stream), the turn's chat request and TTS
+    // socket go with it.
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Runs the session until the host closes it or STT ends.
 // One `select!` over commands, STT frames, turn messages and the keepalive;
 // splitting it would scatter the state it shares.
@@ -160,7 +169,7 @@ pub(crate) async fn run(
                 }
                 Some(ClientCommand::Text(text)) => {
                     if !text.trim().is_empty() {
-                        stop_turn(&mut turn, &events, false).await;
+                        stop_turn(&mut turn, &mut history, &events, false).await;
                         history.push(chat::user_message(&text));
                         next_id += 1;
                         turn = Some(spawn_turn(next_id, &ctx, history.clone(), TurnInput::Ask, ctx.speech_language(detected.as_deref()), &turn_tx));
@@ -172,7 +181,7 @@ pub(crate) async fn run(
                         let _ = active.tools.send(result).await;
                     }
                 }
-                Some(ClientCommand::Interrupt) => stop_turn(&mut turn, &events, true).await,
+                Some(ClientCommand::Interrupt) => stop_turn(&mut turn, &mut history, &events, true).await,
                 Some(_) => {}
             },
             frame = stt_ws.next() => {
@@ -208,12 +217,12 @@ pub(crate) async fn run(
                         if language.is_some() {
                             detected = language;
                         }
-                        stop_turn(&mut turn, &events, false).await;
+                        stop_turn(&mut turn, &mut history, &events, false).await;
                         history.push(chat::user_message(&text));
                         next_id += 1;
                         turn = Some(spawn_turn(next_id, &ctx, history.clone(), TurnInput::Ask, ctx.speech_language(detected.as_deref()), &turn_tx));
                     }
-                    SttEvent::SpeechStart => stop_turn(&mut turn, &events, true).await,
+                    SttEvent::SpeechStart => stop_turn(&mut turn, &mut history, &events, true).await,
                     SttEvent::Error { message, fatal } => {
                         let error = stt_error(message);
                         events.emit(LiveEvent::Error { error: error.clone(), fatal }).await;
@@ -229,7 +238,13 @@ pub(crate) async fn run(
             message = turn_rx.recv() => {
                 let Some((id, message)) = message else { continue };
                 match message {
-                    TurnMsg::Commit(value) => history.push(value),
+                    // A stopped turn's queued commits are dropped: they would
+                    // land after the next user message, out of order.
+                    TurnMsg::Commit(value) => {
+                        if turn.as_ref().is_some_and(|t| t.id == id) {
+                            history.push(value);
+                        }
+                    }
                     TurnMsg::Event(event) => {
                         let current = turn.as_mut().filter(|t| t.id == id);
                         if let Some(active) = current {
@@ -281,11 +296,20 @@ pub(crate) fn sarvam_close_error(code: u16, reason: &str) -> Option<Error> {
 
 /// Aborts the running turn, if any. With `barge_in`, tells the host to drop
 /// playback; outstanding tool calls are always cancelled.
-async fn stop_turn(turn: &mut Option<Turn>, events: &EventSink, barge_in: bool) {
-    let Some(active) = turn.take() else {
+async fn stop_turn(
+    turn: &mut Option<Turn>,
+    history: &mut Vec<Value>,
+    events: &EventSink,
+    barge_in: bool,
+) {
+    let Some(mut active) = turn.take() else {
         return;
     };
     active.task.abort();
+    // The turn may have committed an assistant `tool_calls` message whose
+    // results never came; answer them so the history stays a valid
+    // conversation for the next completion.
+    chat::close_dangling_tool_calls(history);
     tracing::debug!(
         turn = active.id,
         barge_in,
@@ -294,7 +318,7 @@ async fn stop_turn(turn: &mut Option<Turn>, events: &EventSink, barge_in: bool) 
     if !active.pending_calls.is_empty() {
         events
             .emit(LiveEvent::ToolCallCancelled {
-                call_ids: active.pending_calls,
+                call_ids: std::mem::take(&mut active.pending_calls),
             })
             .await;
     }

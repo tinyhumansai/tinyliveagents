@@ -153,3 +153,30 @@ async fn reports_refusals_and_bad_chunks() {
         Some(Error::Connect("sarvam chat endpoint unreachable".into()))
     );
 }
+
+#[test]
+fn answers_dangling_tool_calls_once() {
+    let call = |id: &str| ToolCall {
+        call_id: id.into(),
+        name: "f".into(),
+        args: json!({}),
+    };
+    let mut history = vec![
+        user_message("q"),
+        assistant_message("", &[call("a"), call("b")]),
+        tool_message(&ToolResult::ok(&call("a"), "done")),
+    ];
+    close_dangling_tool_calls(&mut history);
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        history[3],
+        json!({"role": "tool", "tool_call_id": "b", "content": "Error: cancelled"})
+    );
+    // Already consistent: nothing more is added.
+    close_dangling_tool_calls(&mut history);
+    assert_eq!(history.len(), 4);
+    // No tool calls at all: untouched.
+    let mut plain = vec![user_message("q"), assistant_message("hi", &[])];
+    close_dangling_tool_calls(&mut plain);
+    assert_eq!(plain.len(), 2);
+}

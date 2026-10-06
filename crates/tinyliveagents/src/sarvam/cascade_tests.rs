@@ -265,8 +265,15 @@ async fn interrupting_while_a_tool_runs_cancels_the_call() {
         let _ = expect_close(&mut ws).await;
     })
     .await;
-    let chat = MockHttp::start(vec![(200, sse(&[tool_chunk("c9", "get_time", "{}")]))]).await;
-    let tts = MockServer::start(|mut ws, _| async move {
+    let chat = MockHttp::start(vec![
+        (200, sse(&[tool_chunk("c9", "get_time", "{}")])),
+        (200, sse(&[text_chunk("Okay.")])),
+    ])
+    .await;
+    let tts = MockServer::start_many(2, |index, mut ws, _| async move {
+        if index == 1 {
+            tts_utterance(&mut ws, "Okay.").await;
+        }
         let _ = expect_close(&mut ws).await;
     })
     .await;
@@ -296,6 +303,26 @@ async fn interrupting_while_a_tool_runs_cancels_the_call() {
     assert_eq!(next_event(&mut session).await, LiveEvent::Interrupted);
     // Interrupting with nothing running is a no-op.
     sender.interrupt().await.unwrap();
+
+    // The next turn's history answers the cancelled call, so the model
+    // endpoint sees a valid conversation.
+    sender.send_text("never mind").await.unwrap();
+    loop {
+        if let LiveEvent::TurnComplete { .. } = next_event(&mut session).await {
+            break;
+        }
+    }
+    let requests = chat.requests.lock().unwrap().clone();
+    let messages = requests[1]["messages"].as_array().unwrap().clone();
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["system", "user", "assistant", "tool", "user"]);
+    assert_eq!(
+        messages[3],
+        json!({"role": "tool", "tool_call_id": "c9", "content": "Error: cancelled"})
+    );
     sender.close().await.unwrap();
     assert_eq!(
         next_event(&mut session).await,
