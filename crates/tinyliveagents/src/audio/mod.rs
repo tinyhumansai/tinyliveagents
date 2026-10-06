@@ -34,11 +34,11 @@ pub fn pcm16_to_samples(bytes: &[u8]) -> Vec<i16> {
 /// Encodes samples as PCM16 little-endian bytes.
 #[must_use]
 pub fn samples_to_pcm16(samples: &[i16]) -> Bytes {
-    let mut out = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        out.extend_from_slice(&sample.to_le_bytes());
-    }
-    Bytes::from(out)
+    samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect::<Vec<u8>>()
+        .into()
 }
 
 /// Resamples PCM16 mono audio from `from_rate` to `to_rate` Hz.
@@ -61,9 +61,18 @@ pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Result<Byt
     if from_rate == to_rate {
         return Ok(bytes.clone());
     }
-    let expected = (bytes.len() / 2)
-        .saturating_mul(to_rate as usize)
-        .div_ceil(from_rate as usize);
+    let input_samples = bytes.len() / 2;
+    let expected = input_samples
+        .checked_mul(to_rate as usize)
+        .map(|n| n.div_ceil(from_rate as usize));
+    let expected = match expected {
+        Some(n) if input_samples <= MAX_RESAMPLE_SAMPLES && n <= MAX_RESAMPLE_SAMPLES => n,
+        _ => {
+            return Err(Error::InvalidConfig(format!(
+                "resampling {input_samples} samples exceeds the {MAX_RESAMPLE_SAMPLES}-sample limit"
+            )));
+        }
+    };
     if expected > MAX_RESAMPLE_SAMPLES {
         return Err(Error::InvalidConfig(format!(
             "resampling would produce {expected} samples, more than {MAX_RESAMPLE_SAMPLES}"
@@ -151,7 +160,7 @@ fn ulaw_decode(byte: u8) -> i16 {
     let mantissa = byte & 0x0F;
     let magnitude = (((mantissa << 3) + ULAW_BIAS) << exponent) - ULAW_BIAS;
     #[allow(clippy::cast_possible_truncation)]
-    let sample = if sign == 0 { magnitude } else { -magnitude } as i16;
+    let sample = (if sign == 0 { magnitude } else { -magnitude }) as i16;
     sample
 }
 

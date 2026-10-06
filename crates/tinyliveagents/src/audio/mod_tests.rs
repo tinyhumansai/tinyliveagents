@@ -46,6 +46,15 @@ fn oversized_results_are_refused() {
 }
 
 #[test]
+fn oversized_inputs_are_refused_even_when_downsampling() {
+    let huge = Bytes::from(vec![0_u8; 2 * (MAX_RESAMPLE_SAMPLES + 1)]);
+    assert!(matches!(
+        resample_pcm16(&huge, 48_000, 8_000),
+        Err(Error::InvalidConfig(_))
+    ));
+}
+
+#[test]
 fn empty_input_resamples_to_empty() {
     assert!(
         resample_pcm16(&Bytes::new(), 24_000, 16_000)
