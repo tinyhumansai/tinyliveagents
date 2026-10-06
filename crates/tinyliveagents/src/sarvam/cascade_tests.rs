@@ -3,7 +3,7 @@
 use super::*;
 use crate::LiveProvider;
 use crate::sarvam::{SarvamCascade, SarvamEndpoints};
-use crate::testkit::{
+use crate::test_support::{
     MockHttp, MockServer, ServerSocket, close_with, collect_events, expect_close, next_event,
     next_json, send_json, sse, text_chunk, tool_chunk,
 };
@@ -76,6 +76,7 @@ async fn next_settled(session: &mut crate::LiveSession) -> LiveEvent {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // one whole conversation, asserted step by step
 async fn a_spoken_question_calls_a_tool_and_speaks_the_answer() {
     let stt = MockServer::start(|mut ws, upgrade| async move {
         assert_eq!(upgrade.header("api-subscription-key"), Some("key"));
@@ -450,7 +451,7 @@ async fn degrades_when_chat_or_tts_fail() {
     ])
     .await;
     // No TTS server at all: replies continue without audio.
-    let mut session = provider(&stt, &chat, "ws://127.0.0.1:9")
+    let mut session = provider(&stt, &chat, &crate::test_support::closed_url("ws").await)
         .connect(LiveConfig::new())
         .await
         .unwrap();
@@ -585,4 +586,111 @@ impl Garbage for ServerSocket {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn typed_input_during_a_reply_is_a_barge_in_and_the_cut_reply_is_not_kept() {
+    let stt = MockServer::start(|mut ws, _| async move {
+        send_json(
+            &mut ws,
+            json!({"event": "transcript.final", "text": "tell me a story"}),
+        )
+        .await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let chat = MockHttp::start(vec![
+        (200, sse(&[text_chunk("Once upon a time there was a fox.")])),
+        (200, sse(&[text_chunk("Okay.")])),
+    ])
+    .await;
+    let tts = MockServer::start_many(2, |index, mut ws, _| async move {
+        if index == 0 {
+            assert_eq!(next_json(&mut ws).await["type"], "config");
+            assert_eq!(next_json(&mut ws).await["type"], "text");
+            assert_eq!(next_json(&mut ws).await["type"], "flush");
+            send_json(&mut ws, json!({"type": "audio", "data": {"audio": "AQI="}})).await;
+        } else {
+            tts_utterance(&mut ws, "Okay.").await;
+        }
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let mut session = provider(&stt, &chat, &tts.url)
+        .connect(LiveConfig::new())
+        .await
+        .unwrap();
+    let sender = session.sender();
+    loop {
+        if let LiveEvent::Audio(_) = next_event(&mut session).await {
+            break;
+        }
+    }
+    sender.send_text("stop").await.unwrap();
+    assert_eq!(next_settled(&mut session).await, LiveEvent::Interrupted);
+    loop {
+        if let LiveEvent::TurnComplete { .. } = next_event(&mut session).await {
+            break;
+        }
+    }
+    let requests = chat.requests.lock().unwrap().clone();
+    let contents: Vec<&str> = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    // The story was cut off before it was spoken, so it is not history.
+    assert_eq!(contents, vec!["tell me a story", "stop"]);
+    sender.close().await.unwrap();
+    let _ = collect_events(&mut session).await;
+    stt.finish().await;
+    tts.finish().await;
+}
+
+#[tokio::test]
+async fn a_cut_off_completion_is_neither_committed_nor_acted_on() {
+    let stt = MockServer::start(|mut ws, _| async move {
+        send_json(&mut ws, json!({"event": "transcript.final", "text": "one"})).await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    // No `[DONE]` and no finish reason: the stream was cut off mid-call.
+    let partial = format!("data: {}\n\n", tool_chunk("c1", "get_time", "{\"tz\": "));
+    let chat = MockHttp::start(vec![(200, partial), (200, sse(&[text_chunk("Fine.")]))]).await;
+    let mut session = provider(&stt, &chat, &crate::test_support::closed_url("ws").await)
+        .connect(config())
+        .await
+        .unwrap();
+    let sender = session.sender();
+    let mut saw_cutoff = false;
+    loop {
+        match next_event(&mut session).await {
+            LiveEvent::ToolCall(call) => panic!("acted on a cut-off call: {call:?}"),
+            LiveEvent::Error {
+                error: Error::Protocol(message),
+                ..
+            } if message.contains("ended early") => saw_cutoff = true,
+            LiveEvent::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_cutoff);
+    sender.send_text("again").await.unwrap();
+    loop {
+        if let LiveEvent::TurnComplete { .. } = next_event(&mut session).await {
+            break;
+        }
+    }
+    let requests = chat.requests.lock().unwrap().clone();
+    let roles: Vec<&str> = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["system", "user", "user"]);
+    sender.close().await.unwrap();
+    let _ = collect_events(&mut session).await;
+    stt.finish().await;
 }

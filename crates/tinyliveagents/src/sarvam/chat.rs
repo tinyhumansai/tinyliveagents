@@ -119,18 +119,22 @@ fn tool_spec(tool: &ToolDeclaration) -> Value {
 }
 
 /// Splits a server-sent-event byte stream into `data:` payloads.
+///
+/// Bytes are buffered until a whole line arrives and only then decoded, so a
+/// multi-byte UTF-8 character split across network chunks stays intact.
 #[derive(Debug, Default)]
 pub(crate) struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl SseParser {
     /// Feeds bytes and returns every complete `data:` payload.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
+        self.buffer.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some(end) = self.buffer.find('\n') {
-            let line: String = self.buffer.drain(..=end).collect();
+        while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
+            let raw: Vec<u8> = self.buffer.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&raw);
             let line = line.trim_end_matches(['\r', '\n']);
             if let Some(data) = line.strip_prefix("data:") {
                 out.push(data.trim_start().to_string());
@@ -146,6 +150,7 @@ pub(crate) struct ChatAccumulator {
     pub(crate) text: String,
     calls: BTreeMap<u64, (String, String, String)>,
     pub(crate) usage: Option<Usage>,
+    finish_reason: Option<String>,
 }
 
 impl ChatAccumulator {
@@ -158,6 +163,12 @@ impl ChatAccumulator {
                 total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
                 audio_seconds: None,
             });
+        }
+        if let Some(reason) = chunk
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            self.finish_reason = Some(reason.to_string());
         }
         let delta = chunk.pointer("/choices/0/delta")?;
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -181,6 +192,12 @@ impl ChatAccumulator {
         }
         self.text.push_str(text);
         Some(text.to_string())
+    }
+
+    /// Whether the model reported why it stopped (`stop`, `tool_calls`, ...),
+    /// i.e. the completion was not cut off.
+    pub(crate) fn finished(&self) -> bool {
+        self.finish_reason.is_some()
     }
 
     /// The completed tool calls. Unparseable arguments become `{}` with the
@@ -214,6 +231,7 @@ pub(crate) struct ChatStream {
     parser: SseParser,
     queued: std::collections::VecDeque<String>,
     done: bool,
+    saw_done: bool,
 }
 
 impl std::fmt::Debug for ChatStream {
@@ -225,6 +243,11 @@ impl std::fmt::Debug for ChatStream {
 }
 
 impl ChatStream {
+    /// Whether the server ended the stream with `[DONE]`.
+    pub(crate) fn completed(&self) -> bool {
+        self.saw_done
+    }
+
     /// The next parsed chunk, or `None` at the end of the stream.
     ///
     /// # Errors
@@ -236,6 +259,7 @@ impl ChatStream {
             if let Some(data) = self.queued.pop_front() {
                 if data == "[DONE]" {
                     self.done = true;
+                    self.saw_done = true;
                     return None;
                 }
                 return Some(
@@ -303,6 +327,7 @@ pub(crate) async fn start(
         parser: SseParser::default(),
         queued: std::collections::VecDeque::new(),
         done: false,
+        saw_done: false,
     })
 }
 

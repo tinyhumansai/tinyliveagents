@@ -1,7 +1,7 @@
 //! Tests for the Sarvam chat client.
 
 use super::*;
-use crate::testkit::{MockHttp, sse, text_chunk, tool_chunk};
+use crate::test_support::{MockHttp, sse, text_chunk, tool_chunk};
 
 #[test]
 fn builds_messages() {
@@ -60,7 +60,7 @@ fn builds_the_request_body() {
 #[test]
 fn parses_sse_across_chunk_boundaries() {
     let mut parser = SseParser::default();
-    assert!(parser.push(b"data: {\"a\"").is_empty());
+    assert!(parser.push(b"data: {\"a\"").is_empty(), "expected nothing");
     assert_eq!(
         parser.push(b":1}\r\n\r\n: comment\ndata:[DONE]\n"),
         vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]
@@ -149,7 +149,14 @@ async fn reports_refusals_and_bad_chunks() {
     assert!(stream.next().await.is_none());
     assert!(stream.next().await.is_none());
     assert_eq!(
-        start(&http, "http://127.0.0.1:9/x", "k", &body).await.err(),
+        start(
+            &http,
+            &format!("{}/x", crate::test_support::closed_url("http").await),
+            "k",
+            &body
+        )
+        .await
+        .err(),
         Some(Error::Connect("sarvam chat endpoint unreachable".into()))
     );
 }
@@ -179,4 +186,26 @@ fn answers_dangling_tool_calls_once() {
     let mut plain = vec![user_message("q"), assistant_message("hi", &[])];
     close_dangling_tool_calls(&mut plain);
     assert_eq!(plain.len(), 2);
+}
+
+#[test]
+fn sse_keeps_utf8_split_across_chunks() {
+    let mut parser = SseParser::default();
+    let line = "data: {\"t\":\"नमस्ते\"}\n".as_bytes();
+    // Split inside the first multi-byte character.
+    let cut = line.iter().position(|b| *b >= 0x80).unwrap() + 1;
+    assert!(parser.push(&line[..cut]).is_empty(), "expected nothing");
+    assert_eq!(
+        parser.push(&line[cut..]),
+        vec!["{\"t\":\"नमस्ते\"}".to_string()]
+    );
+}
+
+#[test]
+fn tracks_finish_reasons() {
+    let mut acc = ChatAccumulator::default();
+    acc.apply(&text_chunk("hi"));
+    assert!(!acc.finished());
+    acc.apply(&json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}));
+    assert!(acc.finished());
 }

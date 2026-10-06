@@ -169,7 +169,7 @@ pub(crate) async fn run(
                 }
                 Some(ClientCommand::Text(text)) => {
                     if !text.trim().is_empty() {
-                        stop_turn(&mut turn, &mut history, &events, false).await;
+                        stop_turn(&mut turn, &mut history, &events).await;
                         history.push(chat::user_message(&text));
                         next_id += 1;
                         turn = Some(spawn_turn(next_id, &ctx, history.clone(), TurnInput::Ask, ctx.speech_language(detected.as_deref()), &turn_tx));
@@ -181,7 +181,7 @@ pub(crate) async fn run(
                         let _ = active.tools.send(result).await;
                     }
                 }
-                Some(ClientCommand::Interrupt) => stop_turn(&mut turn, &mut history, &events, true).await,
+                Some(ClientCommand::Interrupt) => stop_turn(&mut turn, &mut history, &events).await,
                 Some(_) => {}
             },
             frame = stt_ws.next() => {
@@ -217,12 +217,12 @@ pub(crate) async fn run(
                         if language.is_some() {
                             detected = language;
                         }
-                        stop_turn(&mut turn, &mut history, &events, false).await;
+                        stop_turn(&mut turn, &mut history, &events).await;
                         history.push(chat::user_message(&text));
                         next_id += 1;
                         turn = Some(spawn_turn(next_id, &ctx, history.clone(), TurnInput::Ask, ctx.speech_language(detected.as_deref()), &turn_tx));
                     }
-                    SttEvent::SpeechStart => stop_turn(&mut turn, &mut history, &events, true).await,
+                    SttEvent::SpeechStart => stop_turn(&mut turn, &mut history, &events).await,
                     SttEvent::Error { message, fatal } => {
                         let error = stt_error(message);
                         events.emit(LiveEvent::Error { error: error.clone(), fatal }).await;
@@ -294,14 +294,10 @@ pub(crate) fn sarvam_close_error(code: u16, reason: &str) -> Option<Error> {
     }
 }
 
-/// Aborts the running turn, if any. With `barge_in`, tells the host to drop
-/// playback; outstanding tool calls are always cancelled.
-async fn stop_turn(
-    turn: &mut Option<Turn>,
-    history: &mut Vec<Value>,
-    events: &EventSink,
-    barge_in: bool,
-) {
+/// Aborts the running turn, if any: cancels its outstanding tool calls and
+/// tells the host to drop queued playback. Replacing a turn (a new utterance
+/// or typed message) is a barge-in just as speech is.
+async fn stop_turn(turn: &mut Option<Turn>, history: &mut Vec<Value>, events: &EventSink) {
     let Some(mut active) = turn.take() else {
         return;
     };
@@ -310,11 +306,7 @@ async fn stop_turn(
     // results never came; answer them so the history stays a valid
     // conversation for the next completion.
     chat::close_dangling_tool_calls(history);
-    tracing::debug!(
-        turn = active.id,
-        barge_in,
-        "tinyliveagents: sarvam turn stopped"
-    );
+    tracing::debug!(turn = active.id, "tinyliveagents: sarvam turn stopped");
     if !active.pending_calls.is_empty() {
         events
             .emit(LiveEvent::ToolCallCancelled {
@@ -322,9 +314,7 @@ async fn stop_turn(
             })
             .await;
     }
-    if barge_in {
-        events.emit(LiveEvent::Interrupted).await;
-    }
+    events.emit(LiveEvent::Interrupted).await;
 }
 
 fn spawn_turn(
@@ -455,14 +445,15 @@ async fn run_turn(
         let mut tts = open_tts(ctx, language, sink).await;
         speak(&mut tts, &text, sink).await;
         flush(&mut tts, sink).await;
-        sink.send(TurnMsg::Commit(chat::assistant_message(&text, &[])))
-            .await;
         sink.event(LiveEvent::OutputTranscript {
-            text,
+            text: text.clone(),
             is_final: true,
         })
         .await;
         drain(&mut tts, sink).await;
+        // Committed only once spoken: an interrupted greeting is not history.
+        sink.send(TurnMsg::Commit(chat::assistant_message(&text, &[])))
+            .await;
         sink.event(LiveEvent::TurnComplete { usage: None }).await;
         if let Some(stream) = tts {
             stream.close().await;
@@ -496,12 +487,14 @@ async fn run_turn(
 
         let mut acc = ChatAccumulator::default();
         let mut chunker = SentenceChunker::default();
+        let mut failed = false;
         loop {
             tokio::select! {
                 chunk = stream.next() => match chunk {
                     None => break,
                     Some(Err(error)) => {
                         sink.error(error).await;
+                        failed = true;
                         break;
                     }
                     Some(Ok(chunk)) => {
@@ -517,6 +510,17 @@ async fn run_turn(
             }
         }
 
+        if !failed && !stream.completed() && !acc.finished() {
+            sink.error(Error::Protocol("sarvam chat stream ended early".into()))
+                .await;
+            failed = true;
+        }
+        if failed {
+            // A broken completion is neither spoken further, committed nor
+            // acted on: its text and tool calls may be cut off mid-way.
+            break;
+        }
+
         if let Some(rest) = chunker.finish() {
             speak(&mut tts, &rest, sink).await;
         }
@@ -524,7 +528,6 @@ async fn run_turn(
         let calls = acc.tool_calls();
         let assistant = chat::assistant_message(&acc.text, &calls);
         messages.push(assistant.clone());
-        sink.send(TurnMsg::Commit(assistant)).await;
         if !acc.text.is_empty() {
             sink.event(LiveEvent::OutputTranscript {
                 text: acc.text.clone(),
@@ -535,6 +538,9 @@ async fn run_turn(
 
         if calls.is_empty() {
             drain(&mut tts, sink).await;
+            // Committed only once spoken, so a reply cut off by barge-in is
+            // not history the next completion builds on.
+            sink.send(TurnMsg::Commit(assistant)).await;
             sink.event(LiveEvent::TurnComplete { usage: acc.usage })
                 .await;
             if let Some(stream) = tts {
@@ -543,6 +549,10 @@ async fn run_turn(
             return;
         }
 
+        // Tool calls are committed before they run: the tools may act, and the
+        // history must say so even if the turn is interrupted (any unanswered
+        // call is then closed as cancelled).
+        sink.send(TurnMsg::Commit(assistant)).await;
         let mut waiting: HashSet<String> = calls.iter().map(|c| c.call_id.clone()).collect();
         for call in calls {
             sink.event(LiveEvent::ToolCall(call)).await;

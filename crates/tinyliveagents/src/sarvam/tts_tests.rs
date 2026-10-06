@@ -1,7 +1,7 @@
 //! Tests for the Sarvam TTS frames and socket.
 
 use super::*;
-use crate::testkit::{MockServer, close_with, next_json};
+use crate::test_support::{MockServer, close_with, next_json};
 
 fn wav(pcm: &[u8]) -> Vec<u8> {
     let mut out = b"RIFF\0\0\0\0WAVE".to_vec();
@@ -25,7 +25,7 @@ fn strips_wav_headers_and_leaves_pcm_alone() {
     no_data.extend_from_slice(b"fmt ");
     no_data.extend_from_slice(&2_u32.to_le_bytes());
     no_data.extend_from_slice(&[0, 0]);
-    assert!(strip_wav_header(no_data).is_empty());
+    assert!(strip_wav_header(no_data).is_empty(), "expected nothing");
 }
 
 #[test]
