@@ -80,3 +80,28 @@ fn streaming_data_sizes_run_to_the_end() {
 fn odd_length_audio_is_refused() {
     assert!(wav_bytes(16_000, &[0]).is_err());
 }
+
+#[test]
+fn refuses_truncated_fmt_and_odd_data() {
+    // fmt declares 16 bytes but only 12 follow (then a data chunk).
+    let mut short_fmt = fmt_chunk(1, 1, 16_000, 16);
+    short_fmt.truncate(8 + 12);
+    assert!(parse_wav(&wav(&[short_fmt])).is_err());
+    let odd = wav(&[fmt_chunk(1, 1, 16_000, 16), data_chunk(3, &[0, 0, 0])]);
+    assert!(parse_wav(&odd).is_err());
+}
+
+#[test]
+fn the_demo_tool_answers_utc_and_refuses_other_zones() {
+    let call = |args| ToolCall {
+        call_id: "c".into(),
+        name: "get_time".into(),
+        args,
+    };
+    let utc = answer_get_time(&call(json!({"timezone": "UTC"})));
+    assert!(!utc.is_error);
+    assert_eq!(utc.output["timezone"], "UTC");
+    assert!(!answer_get_time(&call(json!({}))).is_error);
+    assert!(answer_get_time(&call(json!({"timezone": "Asia/Kolkata"}))).is_error);
+    assert_eq!(utc_hh_mm().len(), 5);
+}

@@ -51,11 +51,20 @@ pub fn parse_wav(bytes: &[u8]) -> Result<(u32, Vec<u8>), BoxError> {
     let mut rate = None;
     while offset < bytes.len() {
         let id: [u8; 4] = field(bytes, offset)?;
-        let size = u32::from_le_bytes(field(bytes, offset + 4)?);
-        let body = offset + 8;
+        let size_at = offset.checked_add(4).ok_or("wav chunk offset overflows")?;
+        let size = u32::from_le_bytes(field(bytes, size_at)?);
+        let body = offset.checked_add(8).ok_or("wav chunk offset overflows")?;
         if &id == b"fmt " {
             if size < 16 {
                 return Err("wav fmt chunk is too short".into());
+            }
+            // The whole declared chunk must be present, so no field is read
+            // from the bytes of whatever follows it.
+            if body
+                .checked_add(size as usize)
+                .is_none_or(|end| end > bytes.len())
+            {
+                return Err("wav fmt chunk is truncated".into());
             }
             let format = u16::from_le_bytes(field(bytes, body)?);
             let channels = u16::from_le_bytes(field(bytes, body + 2)?);
@@ -74,13 +83,11 @@ pub fn parse_wav(bytes: &[u8]) -> Result<(u32, Vec<u8>), BoxError> {
                     .filter(|end| *end <= bytes.len())
                     .ok_or("wav data chunk is truncated")?
             };
-            return Ok((
-                rate,
-                bytes
-                    .get(body..end)
-                    .ok_or("wav data chunk is truncated")?
-                    .to_vec(),
-            ));
+            let data = bytes.get(body..end).ok_or("wav data chunk is truncated")?;
+            if !data.len().is_multiple_of(2) {
+                return Err("wav data is not whole PCM16 samples".into());
+            }
+            return Ok((rate, data.to_vec()));
         }
         let padded = (size as usize).checked_add(size as usize & 1);
         offset = padded
@@ -124,7 +131,7 @@ pub async fn read_wav_16k(path: &Path) -> Result<Vec<u8>, BoxError> {
 /// When the audio has an odd length, or it or the byte rate does not fit a
 /// WAV header's 32-bit fields.
 pub fn wav_bytes(rate: u32, pcm: &[u8]) -> Result<Vec<u8>, BoxError> {
-    if pcm.len() % 2 != 0 {
+    if !pcm.len().is_multiple_of(2) {
         return Err("PCM16 audio must have an even number of bytes".into());
     }
     let data_len = u32::try_from(pcm.len()).map_err(|_| "audio is too long for a wav file")?;
@@ -134,7 +141,11 @@ pub fn wav_bytes(rate: u32, pcm: &[u8]) -> Result<Vec<u8>, BoxError> {
     let byte_rate = rate
         .checked_mul(2)
         .ok_or("sample rate is too high for a wav file")?;
-    let mut out = Vec::with_capacity(pcm.len() + 44);
+    let total = pcm
+        .len()
+        .checked_add(44)
+        .ok_or("audio is too long for a wav file")?;
+    let mut out = Vec::with_capacity(total);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&riff_len.to_le_bytes());
     out.extend_from_slice(b"WAVEfmt ");
@@ -206,10 +217,17 @@ pub fn utc_hh_mm() -> String {
     format!("{:02}:{:02}", minutes_today / 60, minutes_today % 60)
 }
 
-/// The demo tool's answer: the real current UTC time.
+/// The demo tool's answer: the real current UTC time, or an error result for
+/// any other requested timezone (the demo does not convert zones).
 #[must_use]
 pub fn answer_get_time(call: &ToolCall) -> ToolResult {
-    ToolResult::ok(call, json!({ "time": utc_hh_mm(), "timezone": "UTC" }))
+    match call.args.get("timezone").and_then(Value::as_str) {
+        Some(zone) if !zone.trim().eq_ignore_ascii_case("utc") => ToolResult::error(
+            call,
+            format!("only UTC is supported, not {zone}; answer with the UTC time"),
+        ),
+        _ => ToolResult::ok(call, json!({ "time": utc_hh_mm(), "timezone": "UTC" })),
+    }
 }
 
 /// What came back from a conversation.
@@ -256,15 +274,23 @@ pub const REPLY_SETTLE: Duration = Duration::from_secs(6);
 /// time, then silence, answering `get_time` calls, until a turn completes after
 /// a tool call (or any turn when `expect_tool` is false) or `timeout` passes.
 ///
+/// While settling on a provider without a turn-complete event, every reply
+/// event (audio or text) extends listening by [`REPLY_SETTLE`], so a long
+/// spoken reply is not cut off.
+///
 /// # Errors
 ///
-/// When the first event is not `Ready` or a tool result cannot be sent.
+/// When `utterance` is not whole PCM16 samples, the first event is not
+/// `Ready`, or a tool result cannot be sent.
 pub async fn converse(
     session: &mut LiveSession,
     utterance: &[u8],
     expect_tool: bool,
     timeout: Duration,
 ) -> Result<Recording, BoxError> {
+    if !utterance.len().is_multiple_of(2) {
+        return Err("the utterance is not whole PCM16 samples".into());
+    }
     let sender = session.sender();
     let mut recording = Recording::default();
 
@@ -300,7 +326,34 @@ pub async fn converse(
     let utterance_ms = (utterance.len() / 32) as u64;
     let utterance_end = Instant::now() + Duration::from_millis(utterance_ms);
 
-    let mut deadline = tokio::time::Instant::now() + timeout;
+    let result = listen(
+        session,
+        &sender,
+        &mut recording,
+        expect_tool,
+        timeout,
+        utterance_end,
+    )
+    .await;
+    // Stop the microphone pump on every path, and wait until it has stopped,
+    // before the session is closed.
+    pump.abort();
+    let _ = pump.await;
+    let _ = sender.close().await;
+    result.map(|()| recording)
+}
+
+/// The event loop of [`converse`].
+async fn listen(
+    session: &mut LiveSession,
+    sender: &tinyliveagents::LiveSender,
+    recording: &mut Recording,
+    expect_tool: bool,
+    timeout: Duration,
+    utterance_end: Instant,
+) -> Result<(), BoxError> {
+    let overall = tokio::time::Instant::now() + timeout;
+    let mut deadline = overall;
     // Set once reply text arrives on a turn we are not waiting a tool for:
     // providers without a turn-complete event end there.
     let mut settling = false;
@@ -315,6 +368,9 @@ pub async fn converse(
         let Some(event) = event else { break };
         match event {
             LiveEvent::Audio(audio) => {
+                if settling {
+                    deadline = overall.min(tokio::time::Instant::now() + REPLY_SETTLE);
+                }
                 if recording.first_audio_ms.is_none() {
                     recording.first_audio_ms = Some(
                         Instant::now()
@@ -329,9 +385,11 @@ pub async fn converse(
                 is_final: true,
             } => recording.heard.push(text),
             LiveEvent::OutputTranscript { text, is_final } => {
-                if !expect_tool && !settling {
+                if !expect_tool {
                     settling = true;
-                    deadline = deadline.min(tokio::time::Instant::now() + REPLY_SETTLE);
+                }
+                if settling {
+                    deadline = overall.min(tokio::time::Instant::now() + REPLY_SETTLE);
                 }
                 if is_final {
                     recording.said.push(text);
@@ -344,10 +402,7 @@ pub async fn converse(
                 println!("tool call: {} {}", call.name, call.args);
                 let result = answer_get_time(&call);
                 recording.tool_calls.push(call);
-                if let Err(error) = sender.send_tool_result(result).await {
-                    pump.abort();
-                    return Err(error.into());
-                }
+                sender.send_tool_result(result).await?;
             }
             LiveEvent::TurnComplete { .. } => {
                 recording.turns += 1;
@@ -367,9 +422,7 @@ pub async fn converse(
     if let Some(text) = last_partial {
         recording.said.push(text);
     }
-    pump.abort();
-    let _ = sender.close().await;
-    Ok(recording)
+    Ok(())
 }
 
 /// Whether [`question_audio`] has a source: `LIVE_TEST_WAV` or
