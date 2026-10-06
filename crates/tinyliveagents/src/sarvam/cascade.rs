@@ -122,10 +122,11 @@ pub(crate) async fn run(
         mut commands,
         events,
     } = channels;
-    if !events.emit(LiveEvent::Ready(info)).await {
-        let _ = stt_ws.close(None).await;
-        return;
-    }
+    // `Ready` waits for the STT socket's `session.begin` (or any first
+    // non-error event), so a key or configuration the service refuses right
+    // after the upgrade surfaces from `connect` instead of after it.
+    let mut info = Some(info);
+    let mut first_message = first_message;
     let mut history: Vec<Value> = ctx
         .config
         .system_instruction
@@ -141,18 +142,6 @@ pub(crate) async fn run(
         tokio::time::Instant::now() + STT_PING_INTERVAL,
         STT_PING_INTERVAL,
     );
-
-    if let Some(text) = first_message {
-        next_id += 1;
-        turn = Some(spawn_turn(
-            next_id,
-            &ctx,
-            history.clone(),
-            TurnInput::Say(text),
-            ctx.speech_language(None),
-            &turn_tx,
-        ));
-    }
 
     let reason = loop {
         tokio::select! {
@@ -208,6 +197,25 @@ pub(crate) async fn run(
                         continue;
                     }
                 };
+                if !matches!(event, SttEvent::Error { .. })
+                    && let Some(info) = info.take()
+                {
+                    if !events.emit(LiveEvent::Ready(info)).await {
+                        let _ = stt_ws.close(None).await;
+                        break CloseReason::Client;
+                    }
+                    if let Some(text) = first_message.take() {
+                        next_id += 1;
+                        turn = Some(spawn_turn(
+                            next_id,
+                            &ctx,
+                            history.clone(),
+                            TurnInput::Say(text),
+                            ctx.speech_language(None),
+                            &turn_tx,
+                        ));
+                    }
+                }
                 match event {
                     SttEvent::Partial(text) if !text.is_empty() => {
                         events.emit(LiveEvent::InputTranscript { text, is_final: false }).await;
@@ -419,16 +427,24 @@ async fn flush(tts: &mut Option<TtsStream>, sink: &TurnSink) {
     }
 }
 
-/// Waits for flushed speech to finish, forwarding its audio.
-async fn drain(tts: &mut Option<TtsStream>, sink: &TurnSink) {
+/// Waits for flushed speech to finish, forwarding its audio. Returns whether
+/// everything flushed was delivered: `false` when TTS failed or timed out
+/// mid-playback. A turn with no TTS socket at all (text-only) counts as
+/// delivered, since its transcript reached the host.
+async fn drain(tts: &mut Option<TtsStream>, sink: &TurnSink) -> bool {
     let deadline = tokio::time::Instant::now() + TTS_DRAIN_TIMEOUT;
     while tts.as_ref().is_some_and(TtsStream::is_busy) {
         let Ok(event) = tokio::time::timeout_at(deadline, tts_next(tts)).await else {
             sink.error(Error::Timeout).await;
-            break;
+            return false;
         };
+        let failed = !matches!(event, Some(Ok(_)));
         forward_tts(event, tts, sink).await;
+        if failed {
+            return false;
+        }
     }
+    true
 }
 
 // The model/tool loop of one turn reads best top to bottom.
@@ -450,10 +466,12 @@ async fn run_turn(
             is_final: true,
         })
         .await;
-        drain(&mut tts, sink).await;
-        // Committed only once spoken: an interrupted greeting is not history.
-        sink.send(TurnMsg::Commit(chat::assistant_message(&text, &[])))
-            .await;
+        // Committed only once spoken: an interrupted or undelivered greeting
+        // is not history.
+        if drain(&mut tts, sink).await {
+            sink.send(TurnMsg::Commit(chat::assistant_message(&text, &[])))
+                .await;
+        }
         sink.event(LiveEvent::TurnComplete { usage: None }).await;
         if let Some(stream) = tts {
             stream.close().await;
@@ -549,10 +567,11 @@ async fn run_turn(
         }
 
         if calls.is_empty() {
-            drain(&mut tts, sink).await;
-            // Committed only once spoken, so a reply cut off by barge-in is
-            // not history the next completion builds on.
-            sink.send(TurnMsg::Commit(assistant)).await;
+            // Committed only once fully spoken, so a reply cut off by barge-in
+            // or by a TTS failure is not history the next completion builds on.
+            if drain(&mut tts, sink).await {
+                sink.send(TurnMsg::Commit(assistant)).await;
+            }
             sink.event(LiveEvent::TurnComplete { usage: acc.usage })
                 .await;
             if let Some(stream) = tts {
@@ -584,7 +603,7 @@ async fn run_turn(
         }
     }
     // Ran out of rounds or the model failed: finish what is being said.
-    drain(&mut tts, sink).await;
+    let _ = drain(&mut tts, sink).await;
     sink.event(LiveEvent::TurnComplete { usage: None }).await;
     if let Some(stream) = tts {
         stream.close().await;

@@ -259,3 +259,11 @@ async fn an_oversized_line_ends_the_stream_with_an_error() {
     assert!(matches!(stream.next().await, Some(Err(Error::Protocol(_)))));
     assert!(stream.next().await.is_none());
 }
+
+#[test]
+fn sse_refuses_an_oversized_line_even_when_terminated() {
+    let mut parser = SseParser::default();
+    let mut long = vec![b'x'; MAX_SSE_LINE + 1];
+    long.push(b'\n');
+    assert!(matches!(parser.push(&long), Err(Error::Protocol(_))));
+}

@@ -142,6 +142,11 @@ impl SseParser {
         // LF, CRLF and bare CR all end a line. A CR at the very end may be
         // the first half of a CRLF, so it waits for the next bytes.
         while let Some(end) = self.buffer.iter().position(|b| *b == b'\n' || *b == b'\r') {
+            if end > MAX_SSE_LINE {
+                return Err(Error::Protocol(
+                    "sarvam chat stream line is too long".into(),
+                ));
+            }
             let terminator = match (self.buffer[end], self.buffer.get(end + 1)) {
                 (b'\r', Some(b'\n')) => 2,
                 (b'\r', None) => break,

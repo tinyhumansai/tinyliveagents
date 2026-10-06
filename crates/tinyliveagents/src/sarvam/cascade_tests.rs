@@ -81,8 +81,8 @@ async fn a_spoken_question_calls_a_tool_and_speaks_the_answer() {
     let stt = MockServer::start(|mut ws, upgrade| async move {
         assert_eq!(upgrade.header("api-subscription-key"), Some("key"));
         assert!(upgrade.uri.contains("language_code=en-IN"));
-        assert_eq!(next_json(&mut ws).await["event"], "audio_input");
         send_json(&mut ws, json!({"event": "session.begin"})).await;
+        assert_eq!(next_json(&mut ws).await["event"], "audio_input");
         send_json(
             &mut ws,
             json!({"event": "transcript.partial", "text": "what"}),
@@ -693,4 +693,101 @@ async fn a_cut_off_completion_is_neither_committed_nor_acted_on() {
     sender.close().await.unwrap();
     let _ = collect_events(&mut session).await;
     stt.finish().await;
+}
+
+#[tokio::test]
+async fn ready_waits_for_session_begin_and_refusals_fail_connect() {
+    // Refused right after the upgrade: `connect` reports it.
+    let stt = MockServer::start(|mut ws, _| async move {
+        send_json(
+            &mut ws,
+            json!({"event": "error", "message": "Invalid subscription key", "is_fatal": true}),
+        )
+        .await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let chat = MockHttp::start(vec![]).await;
+    let result = provider(&stt, &chat, &crate::test_support::closed_url("ws").await)
+        .connect(LiveConfig::new())
+        .await;
+    assert_eq!(result.err(), Some(Error::Unauthorized));
+    stt.finish().await;
+
+    // Accepted: Ready comes with session.begin.
+    let stt = MockServer::start(|mut ws, _| async move {
+        send_json(&mut ws, json!({"event": "session.begin"})).await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let mut session = provider(&stt, &chat, &crate::test_support::closed_url("ws").await)
+        .connect(LiveConfig::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut session).await,
+        LiveEvent::Ready(_)
+    ));
+    session.sender().close().await.unwrap();
+    let _ = collect_events(&mut session).await;
+    stt.finish().await;
+}
+
+#[tokio::test]
+async fn a_reply_whose_playback_fails_is_not_committed() {
+    let stt = MockServer::start(|mut ws, _| async move {
+        send_json(
+            &mut ws,
+            json!({"event": "transcript.final", "text": "hello"}),
+        )
+        .await;
+        let _ = expect_close(&mut ws).await;
+    })
+    .await;
+    let chat = MockHttp::start(vec![
+        (200, sse(&[text_chunk("Hi there, friend.")])),
+        (200, sse(&[text_chunk("Okay.")])),
+    ])
+    .await;
+    let tts = MockServer::start_many(2, |index, mut ws, _| async move {
+        if index == 0 {
+            // The socket dies mid-playback.
+            let _ = next_json(&mut ws).await;
+            let _ = next_json(&mut ws).await;
+            let _ = next_json(&mut ws).await;
+            close_with(&mut ws, 1011, "tts down").await;
+        } else {
+            tts_utterance(&mut ws, "Okay.").await;
+            let _ = expect_close(&mut ws).await;
+        }
+    })
+    .await;
+    let mut session = provider(&stt, &chat, &tts.url)
+        .connect(LiveConfig::new())
+        .await
+        .unwrap();
+    let sender = session.sender();
+    loop {
+        if let LiveEvent::TurnComplete { .. } = next_event(&mut session).await {
+            break;
+        }
+    }
+    sender.send_text("again").await.unwrap();
+    loop {
+        if let LiveEvent::TurnComplete { .. } = next_event(&mut session).await {
+            break;
+        }
+    }
+    let requests = chat.requests.lock().unwrap().clone();
+    let contents: Vec<&str> = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(contents, vec!["hello", "again"]);
+    sender.close().await.unwrap();
+    let _ = collect_events(&mut session).await;
+    stt.finish().await;
+    tts.finish().await;
 }
