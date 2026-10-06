@@ -34,5 +34,8 @@ async fn main() -> Result<(), BoxError> {
         "heard {:?}\nsaid {:?}\nerrors {:?}",
         recording.heard, recording.said, recording.errors
     );
+    if !recording.errors.is_empty() {
+        return Err(format!("the conversation failed: {:?}", recording.errors).into());
+    }
     Ok(())
 }

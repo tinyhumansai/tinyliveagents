@@ -38,6 +38,9 @@ async fn main() -> Result<(), BoxError> {
             &recording.errors
         )
     );
+    if !recording.errors.is_empty() {
+        return Err(format!("the conversation failed: {:?}", recording.errors).into());
+    }
     tokio::fs::write(&output, wav_bytes(recording.output_rate, &recording.audio)?).await?;
     println!("wrote {output}");
     Ok(())

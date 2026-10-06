@@ -40,11 +40,11 @@ and tool calls. Provider differences are the library's problem.
 | `Audio` out | `serverContent.modelTurn.parts[].inlineData` | `audio.audio_event` | TTS `audio` (`linear16`) |
 | `Text` | `clientContent` turn | `user_message` | a user turn |
 | `InputTranscript` | accumulated `inputTranscription`; final when the model answers | `tentative_user_transcript` / `user_transcript` | `transcript.partial` / `transcript.final` |
-| `OutputTranscript` | accumulated `outputTranscription` (or text parts); final at turn end or interruption | `agent_response` (always final), `agent_response_correction` | streamed completion text; final at the end of each completion |
+| `OutputTranscript` | accumulated `outputTranscription` (or text parts); final at turn end or interruption | `agent_response` (partial; final once corrected or when the next user or agent turn starts), `agent_response_correction` (final) | streamed completion text; final at the end of each completion |
 | `ToolCall` | `toolCall.functionCalls[]` | `client_tool_call` | completion `tool_calls` |
 | `ToolResult` | `toolResponse.functionResponses[]` (object response) | `client_tool_result` (string result) | a `tool` message, then a follow-up completion |
 | `ToolCallCancelled` | `toolCallCancellation` | — | barge-in during a tool wait |
-| `Interrupted` | `serverContent.interrupted` | `interruption` | `vad.speech_start` while a turn runs, or `ClientCommand::Interrupt` |
+| `Interrupted` | `serverContent.interrupted` | `interruption` | `vad.speech_start` or a new utterance / typed message while a turn runs, or `ClientCommand::Interrupt` |
 | `TurnComplete` | `turnComplete` (+ `usageMetadata`) | — (no such frame) | after the reply finished speaking |
 | `ResumptionHandle` | `sessionResumptionUpdate` | — | — |
 | `GoAway` | `goAway.timeLeft` | — | — |
@@ -70,8 +70,13 @@ history itself and runs one *turn* task per finished user utterance:
 4. otherwise it waits for TTS to finish (`final` event) and emits
    `TurnComplete`.
 
-Barge-in aborts the turn task; committed history is kept, the interrupted
-reply is not.
+Barge-in (speech, a new utterance or a typed message while a turn runs)
+aborts the turn task. A reply is committed to history only once it has been
+fully spoken, so an interrupted reply is not kept. An assistant message with
+tool calls is committed before the tools run, since they may act; calls left
+unanswered by an interruption are closed with `Error: cancelled`. A completion
+that fails or ends without `[DONE]` / a finish reason is neither committed nor
+acted on.
 
 ## Non-goals
 

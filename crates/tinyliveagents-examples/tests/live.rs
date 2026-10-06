@@ -5,15 +5,13 @@
 //! SARVAM_API_KEY=... cargo test -p tinyliveagents-examples --test live -- --ignored --nocapture
 //! ```
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
 use std::time::Duration;
 
 use tinyliveagents::gemini::{GeminiLive, GeminiRelay};
 use tinyliveagents::sarvam::SarvamCascade;
 use tinyliveagents::{LiveConfig, LiveProvider};
 use tinyliveagents_examples::{
-    Recording, audio_source_available, converse, env, get_time_tool, mint_gemini_ticket,
+    BoxError, Recording, audio_source_available, converse, env, get_time_tool, mint_gemini_ticket,
     question_audio,
 };
 
@@ -143,4 +141,30 @@ async fn live_gemini_relay_answers_a_spoken_question_with_a_tool() {
         .await
         .unwrap();
     assert_answered_with_the_tool(&recording);
+}
+
+#[tokio::test]
+#[ignore = "talks to Sarvam; needs SARVAM_API_KEY"]
+async fn live_sarvam_accepts_automatic_language_detection() -> Result<(), BoxError> {
+    let Some(key) = env("SARVAM_API_KEY") else {
+        eprintln!("SARVAM_API_KEY unset; skipping");
+        return Ok(());
+    };
+    let audio = question_audio(QUESTION).await?;
+    let config = LiveConfig::new()
+        .with_system_instruction(PROMPT)
+        .with_tool(get_time_tool())
+        .with_provider_options(serde_json::json!({ "auto_language": true }));
+    let mut session = SarvamCascade::new(key).connect(config).await?;
+    let recording = converse(&mut session, &audio, true, Duration::from_secs(60)).await?;
+    // `language_code=auto` was accepted: speech was recognised and answered.
+    assert!(
+        recording
+            .heard
+            .iter()
+            .any(|h| h.to_lowercase().contains("time")),
+        "{recording:?}"
+    );
+    assert_answered_with_the_tool(&recording);
+    Ok(())
 }

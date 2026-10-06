@@ -1,7 +1,5 @@
 //! Tests for the WAV helpers.
 
-#![allow(clippy::unwrap_used)]
-
 use super::*;
 
 fn fmt_chunk(format: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {

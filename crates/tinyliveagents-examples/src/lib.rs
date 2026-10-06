@@ -184,22 +184,28 @@ pub async fn sarvam_speech(api_key: &str, text: &str, language: &str) -> Result<
 pub fn get_time_tool() -> ToolDeclaration {
     ToolDeclaration::new(
         "get_time",
-        "Returns the current time in a timezone. Always call this to answer questions about the time.",
+        "Returns the current time in UTC (HH:MM). Always call this to answer questions about the time.",
         json!({
             "type": "object",
-            "properties": { "timezone": { "type": "string", "description": "IANA timezone, e.g. UTC" } },
-            "required": ["timezone"]
+            "properties": { "timezone": { "type": "string", "description": "Only UTC is supported" } }
         }),
     )
 }
 
-/// The demo tool's fixed answer.
+/// The current UTC time as `HH:MM`, from the system clock.
+#[must_use]
+pub fn utc_hh_mm() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let minutes_today = (seconds % 86_400) / 60;
+    format!("{:02}:{:02}", minutes_today / 60, minutes_today % 60)
+}
+
+/// The demo tool's answer: the real current UTC time.
 #[must_use]
 pub fn answer_get_time(call: &ToolCall) -> ToolResult {
-    ToolResult::ok(
-        call,
-        json!({ "time": "14:05", "timezone": call.args["timezone"] }),
-    )
+    ToolResult::ok(call, json!({ "time": utc_hh_mm(), "timezone": "UTC" }))
 }
 
 /// What came back from a conversation.
@@ -237,6 +243,10 @@ impl std::fmt::Debug for Recording {
             .finish()
     }
 }
+
+/// How long to keep listening after the first reply text when the provider
+/// has no turn-complete event (ElevenLabs), so the reply audio arrives.
+pub const REPLY_SETTLE: Duration = Duration::from_secs(6);
 
 /// Plays `utterance` (16 kHz PCM16) into `session` in 100 ms frames at real
 /// time, then silence, answering `get_time` calls, until a turn completes after
@@ -286,10 +296,16 @@ pub async fn converse(
     let utterance_ms = (utterance.len() / 32) as u64;
     let utterance_end = Instant::now() + Duration::from_millis(utterance_ms);
 
-    let deadline = tokio::time::Instant::now() + timeout;
+    let mut deadline = tokio::time::Instant::now() + timeout;
+    // Set once reply text arrives on a turn we are not waiting a tool for:
+    // providers without a turn-complete event end there.
+    let mut settling = false;
+    let mut last_partial: Option<String> = None;
     loop {
         let Ok(event) = tokio::time::timeout_at(deadline, session.recv()).await else {
-            recording.errors.push("timed out".into());
+            if !settling {
+                recording.errors.push("timed out".into());
+            }
             break;
         };
         let Some(event) = event else { break };
@@ -308,10 +324,18 @@ pub async fn converse(
                 text,
                 is_final: true,
             } => recording.heard.push(text),
-            LiveEvent::OutputTranscript {
-                text,
-                is_final: true,
-            } => recording.said.push(text),
+            LiveEvent::OutputTranscript { text, is_final } => {
+                if !expect_tool && !settling {
+                    settling = true;
+                    deadline = deadline.min(tokio::time::Instant::now() + REPLY_SETTLE);
+                }
+                if is_final {
+                    recording.said.push(text);
+                    last_partial = None;
+                } else {
+                    last_partial = Some(text);
+                }
+            }
             LiveEvent::ToolCall(call) => {
                 println!("tool call: {} {}", call.name, call.args);
                 let result = answer_get_time(&call);
@@ -331,6 +355,10 @@ pub async fn converse(
             }
             _ => {}
         }
+    }
+    // A reply still open when we stopped listening counts as said.
+    if let Some(text) = last_partial {
+        recording.said.push(text);
     }
     pump.abort();
     let _ = sender.close().await;

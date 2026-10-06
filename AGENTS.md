@@ -23,7 +23,7 @@ crates/
 │       ├── provider/       # the LiveProvider trait + shared config checks
 │       ├── transport/      # WebSocket connect and the generic `WireCodec` driver
 │       ├── audio/          # PCM16 helpers
-│       ├── testkit/        # cfg(test): mock WebSocket / HTTP servers
+│       ├── test_support/   # cfg(test): mock WebSocket / HTTP servers
 │       ├── gemini/         # feature `gemini`
 │       ├── elevenlabs/     # feature `elevenlabs`
 │       └── sarvam/         # feature `sarvam`
@@ -52,7 +52,7 @@ agent harness (OpenHuman uses `tinyagents-live`).
    cascade) owns its task, but must still honour the contract in
    `docs/specs/live-session.md`.
 3. Test the codec frame by frame and the provider end to end against
-   `testkit::MockServer`; add a live test and an example to
+   `test_support::MockServer`; add a live test and an example to
    `tinyliveagents-examples`.
 4. Add a row to the provider tables in `README.md`, `lib.rs` and the spec.
 
@@ -144,7 +144,7 @@ releases are reproducible.
   (`mod_tests.rs` beside a `mod.rs`) and may touch private items. Never name
   one `test.rs` or `tests.rs`, and never write an inline `mod tests { ... }`:
   OpenHuman vendors this crate and enforces the same layout.
-- Provider tests run against `testkit::MockServer` / `testkit::MockHttp`, never
+- Provider tests run against `test_support::MockServer` / `test_support::MockHttp`, never
   the network. Live tests go in `crates/tinyliveagents-examples/tests/live.rs`,
   `#[ignore]`d and skipping when their key is unset.
 - Integration tests live in `crates/<crate>/tests/` and exercise only the public
