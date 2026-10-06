@@ -1,156 +1,123 @@
-# Rust Template
+# tinyliveagents
 
-A production-ready Rust 2024 TinyBus module template used by TinyHumans AI. It
-ships the workspace layout, TinyBus ABI adapter, error handling, testing,
-documentation, CI, and multi-platform release workflow that every new
-integration in this organization starts from.
+One standard Rust API for **live voice agents**: realtime, two-way speech
+conversations with a model that can call functions mid-conversation.
 
-It is a two-crate cargo workspace. `crates/template-bus` is the wire contract —
-member names, payload types, and the contract version, with no transport and no
-behavior — and `crates/template` is the implementation, built as both an `rlib`
-and the `cdylib` TinyBus loads. A host that only makes calls depends on the
-contract crate alone and compiles neither the module nor `tinybus` itself.
+Gemini Live, ElevenLabs Agents and Sarvam AI each speak a different WebSocket
+protocol, with different audio framing, transcript semantics, tool-call shapes
+and close codes. `tinyliveagents` puts one vocabulary in front of all of them:
 
-## Use This Template
+```rust
+use tinyliveagents::{LiveConfig, LiveEvent, LiveProvider, ToolDeclaration, ToolResult};
+use tinyliveagents::sarvam::SarvamCascade;
 
-Choose **Use this template** on GitHub, create a repository, then work through
-the checklist at the top of [`AGENTS.md`](AGENTS.md):
+let provider = SarvamCascade::new(api_key);          // or GeminiLive, GeminiRelay, ElevenLabsConvai
+let mut session = provider
+    .connect(
+        LiveConfig::new()
+            .with_system_instruction("You are a concise voice assistant.")
+            .with_tool(ToolDeclaration::new("get_time", "Current time", schema)),
+    )
+    .await?;
+let sender = session.sender();                       // feed microphone PCM16 @ 16 kHz here
+while let Some(event) = session.recv().await {
+    match event {
+        LiveEvent::Audio(pcm) => play(pcm),          // agent speech, rate in Ready
+        LiveEvent::ToolCall(call) => sender.send_tool_result(ToolResult::ok(&call, run(&call))).await?,
+        LiveEvent::Interrupted => flush_playback(),  // user barged in
+        LiveEvent::Closed(_) => break,
+        _ => {}
+    }
+}
+```
 
-- rename the `crates/template` and `crates/template-bus` directories and the
-  `name` fields in their manifests, and set the shared `description`,
-  `repository`, `keywords`, and `categories`;
-- update this README and the crate documentation in `crates/template/src/lib.rs`;
-- replace the placeholder `greeting` module with the first real feature area, in
-  both crates: the payload types in the contract, the behavior in the module;
-- rename the TinyBus interface, object path, and member constants in
-  `crates/template-bus/src/names/`, and the matching `provides` / `methods`
-  declarations in `crates/template/src/tinybus_module/`;
-- update the security contact and repository links in the community files;
-- replace `ROADMAP.md` with the real plan, or delete it;
-- change the license if GPL-3.0-only is not appropriate.
+## Providers
 
-Search for `template` and `template_bus` to find every remaining
-template-specific value.
+| Provider | Type | Feature | How it connects |
+| --- | --- | --- | --- |
+| Gemini Live, direct | `gemini::GeminiLive` | `gemini` | Google API key; native audio, 16 kHz in / 24 kHz out |
+| Gemini Live, relayed | `gemini::GeminiRelay` | `gemini` | A relay ticket URL minted by the host (e.g. the TinyHumans backend); build the mint request with `gemini::ticket_request` |
+| ElevenLabs Agents | `elevenlabs::ElevenLabsConvai` | `elevenlabs` | A signed URL minted by a backend, or an agent id + API key |
+| Sarvam AI | `sarvam::SarvamCascade` | `sarvam` | API key; chains streaming STT → chat completions (tools) → streaming TTS |
 
-## What You Get
+All four emit the same events: `Ready`, `Audio`, `InputTranscript` /
+`OutputTranscript` (partial text replaced until `is_final`), `ToolCall`,
+`ToolCallCancelled`, `Interrupted`, `TurnComplete`, `ResumptionHandle`,
+`GoAway`, `Error`, and `Closed`. Close codes and handshake refusals map onto one
+`Error` enum (`Unauthorized`, `InsufficientCredits`, `RateLimited`, `Timeout`,
+...).
 
-| Area | What is configured |
-| --- | --- |
-| Layout | A cargo workspace under `crates/`, split into a dependency-light wire contract and the module that implements it; directory modules with `mod.rs` / `types.rs` / `test.rs`, a crate-wide error type, integration tests, and a runnable example |
-| Lints | `unsafe_code` forbidden, `missing_docs`, clippy `all` + `pedantic`, no `unwrap`/`expect`/`panic`/`todo` in library code — all declared once in `[workspace.lints]` so every crate, local run, and CI run agree |
-| CI | Format, clippy, build, test (default and all features), a run of the bundled example, an assertion that the contract crate stays transport-free, at least 90% line coverage in every source file, rustdoc with `-D warnings`, an MSRV build, and a `cargo-deny` supply-chain check |
-| Release | Manual `workflow_dispatch` bump that validates, versions, tags, and creates installable native module packages for every supported platform |
-| Community | Issue and pull request templates, Dependabot, contributing, security, support, and code of conduct docs |
-| Agents | [`AGENTS.md`](AGENTS.md) as the single source of truth, symlinked as `CLAUDE.md`, plus a `.claude/settings.json` allowlist for the standard commands |
-| Vendor | TinyBus host types and module SDK pinned as the `vendor/tinybus` build-time submodule |
+## What this crate does not do
+
+It standardizes provider APIs and nothing more:
+
+- it never **executes tools**: a `ToolCall` goes to the host, which answers
+  with a `ToolResult`;
+- it never **stores or looks up credentials** and never **mints** relay
+  tickets or signed URLs: providers are constructed with what they need;
+- it applies **no policy**: approvals, tool scoping and transcript persistence
+  belong to the host or to an agent harness on top (OpenHuman runs sessions
+  through `tinyagents-live`).
 
 ## Layout
 
 ```text
-Cargo.toml              # virtual workspace: members, shared metadata, lints
 crates/
-├── template-bus/       # the wire contract — what crosses the bus
-│   ├── README.md       # why the contract is its own crate
+├── tinyliveagents/            # the library
 │   └── src/
-│       ├── lib.rs      # crate docs + the entire public re-export surface
-│       ├── names/      # interface, object path, one constant per member
-│       ├── greeting/   # payload types, one directory per family
-│       │   ├── mod.rs
-│       │   ├── types.rs
-│       │   └── test.rs
-│       └── version/    # contract version and the host bind rule
-└── template/           # the module — behavior, adapter, and the cdylib
-    ├── src/
-    │   ├── lib.rs      # crate docs + public surface, re-exporting the contract
-    │   ├── error/      # crate-wide `Error` and `Result<T>`
-    │   ├── greeting/   # one directory per feature area
-    │   └── tinybus_module/   # bus interface, setup, and ABI v1 exports
-    ├── tests/
-    │   └── public_api.rs     # integration tests against the public API only
-    └── examples/
-        ├── basic.rs                  # ordinary library API usage
-        ├── verify_module.rs          # local dynamic-module verification
-        └── verify_github_release.rs  # tagged-release download and bus call
-vendor/
-└── tinybus/            # pinned TinyBus git submodule
-docs/
-├── README.md           # documentation index and conventions
-├── specs/              # behavior and architecture specifications
-├── plans/              # implementation-ordered delivery plans
-└── adr/                # immutable architecture decision records
+│       ├── types/             # LiveConfig, ClientCommand, LiveEvent, ToolCall, ...
+│       ├── session/           # LiveSession, LiveSender, LiveEvents
+│       ├── provider/          # the LiveProvider trait
+│       ├── transport/         # WebSocket connect + the generic codec driver
+│       ├── audio/             # PCM16 conversion and resampling
+│       ├── gemini/            # setup, schema cleaning, wire codec, providers
+│       ├── elevenlabs/        # wire codec, provider
+│       └── sarvam/            # stt, chat, tts, chunker, cascade, provider
+└── tinyliveagents-examples/   # runnable examples + live (network) tests
 ```
 
-The split is the point. A payload type describes what a frame carries; the
-behavior that answers it is a different obligation. `template` depends on
-`template-bus` and re-exports all of it, so `template::GreetRequest` and
-`template_bus::GreetRequest` are the *same* type rather than structural twins,
-and a host is never forced to choose between linking the whole module and
-redefining the vocabulary. See
-[`crates/template-bus/README.md`](crates/template-bus/README.md).
-
-Within each crate, feature areas use directory modules: implementation and
-exports live in `mod.rs`, substantial types move to `types.rs`, and unit tests
-live in `test.rs`. [`AGENTS.md`](AGENTS.md) holds the complete repository
-guidance, and `CLAUDE.md` is a symlink to it so every coding agent reads one
-source of truth.
+Each module keeps its tests in a sibling `<module>_tests.rs` (`mod_tests.rs`
+beside a `mod.rs`). Provider tests run against in-process mock WebSocket and
+HTTP servers, so `cargo test` never touches the network.
 
 ## Development
-
-Clone with submodules, or initialize them before building:
-
-```sh
-git submodule update --init --recursive
-```
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo build --all-targets --all-features
-cargo test --all-features
-cargo run -p template --example basic
-cargo build -p template --release --lib   # produces the installable cdylib
+cargo test --workspace --all-features
+.github/scripts/check-file-coverage.sh 90 coverage.json   # 90% per file
 ```
 
-Those four checks are exactly what CI runs. Optional extras:
+### Live tests and examples
+
+`tinyliveagents-examples` talks to real providers. Its tests are `#[ignore]`d
+and skip when their key is unset:
 
 ```sh
-cargo doc --no-deps --all-features   # CI builds this with RUSTDOCFLAGS="-D warnings"
-cargo deny check all                 # supply-chain check; see deny.toml
-cargo install cargo-llvm-cov         # once, before running the coverage gate
-.github/scripts/check-file-coverage.sh 90 coverage.json
+SARVAM_API_KEY=... cargo test -p tinyliveagents-examples --test live -- --ignored --nocapture
+SARVAM_API_KEY=... cargo run -p tinyliveagents-examples --example sarvam_tool_call -- "" reply.wav
+GEMINI_API_KEY=... SARVAM_API_KEY=... cargo run -p tinyliveagents-examples --example gemini_direct
+TINYHUMANS_API_KEY=... SARVAM_API_KEY=... cargo run -p tinyliveagents-examples --example gemini_relay
+TINYHUMANS_API_KEY=... SARVAM_API_KEY=... cargo run -p tinyliveagents-examples --example elevenlabs_relay
 ```
+
+The spoken question comes from `LIVE_TEST_WAV` (16 kHz PCM16 mono) or is
+synthesized with Sarvam's REST TTS. See [`.env.example`](.env.example).
 
 ## Releasing
 
-Run the **Release** workflow from the Actions tab with a `patch`, `minor`, or
-`major` bump. Use `current` only to resume an interrupted release whose version
-commit and tag already exist. The workflow revalidates the workspace, versions
-and tags it — one `[workspace.package]` version that every member inherits —
-builds `crates/template` as a TinyBus `cdylib`, and creates a GitHub release.
-Assets follow `template-<version>-<platform>.<tar.gz|zip>` and contain the
-native module, its SHA-256 `modules.toml`, license, and
-[`MODULE.md`](MODULE.md). Every release also publishes `checksum.toml`, which
-TinyBus uses to verify an archive before extraction. The workflow loads the
-published Ubuntu archive through TinyBus's GitHub release API and calls its
-`Greet` method before declaring the release successful. TinyBus itself is not
-shipped by this repository; the pinned submodule is the build-time SDK. The stable native
-matrix covers Ubuntu 22.04 and 24.04 on x86_64 and ARM64; Fedora 43 and 44 on
-x86_64 and ARM64; rolling Arch Linux on its officially supported x86_64
-architecture; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022
-and 2025 on x86_64; and Windows 11 on ARM64. Preview, deprecated, and unofficial
-architecture images are not release gates. Do not hand-edit the version in the
-root `Cargo.toml`.
+Run the **Release** workflow (`workflow_dispatch`) with a `patch` / `minor` /
+`major` bump. It validates, bumps the workspace version, tags `vX.Y.Z`, and
+creates a GitHub release. Consumers pin the tag as a git dependency.
 
 ## Documentation
 
-- [`AGENTS.md`](AGENTS.md) — repository guidelines for humans and agents
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to propose a change
-- [`docs/specs/`](docs/specs/README.md) — behavior and architecture specs
-- [`docs/plans/`](docs/plans/README.md) — test-first implementation plans
-- [`docs/adr/`](docs/adr/0001-record-architecture-decisions.md) — architecture
-  decision records
-- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability
+- [`AGENTS.md`](AGENTS.md): conventions for humans and coding agents.
+- [`docs/specs/live-session.md`](docs/specs/live-session.md): the standard
+  session contract and each provider's mapping onto it.
+- [`ROADMAP.md`](ROADMAP.md): what is shipped and what is next.
 
 ## License
 
-GPL-3.0-only. See [LICENSE](LICENSE).
+GPL-3.0-only. See [`LICENSE`](LICENSE).
