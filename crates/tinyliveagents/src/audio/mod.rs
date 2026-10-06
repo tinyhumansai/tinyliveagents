@@ -16,9 +16,12 @@ use crate::error::{Error, Result};
 /// The lowest sample rate [`resample_pcm16`] accepts.
 pub const MIN_SAMPLE_RATE: u32 = 4_000;
 /// The highest sample rate [`resample_pcm16`] accepts. Bounding both ends caps
-/// the output at 48× the input, so a bogus rate cannot trigger a huge
-/// allocation.
+/// the output at 48× the input.
 pub const MAX_SAMPLE_RATE: u32 = 192_000;
+/// The most samples one [`resample_pcm16`] call produces: ten minutes at
+/// 48 kHz (about 55 MiB). Live audio arrives in ~100 ms chunks, so a larger
+/// result means a bogus input, not speech.
+pub const MAX_RESAMPLE_SAMPLES: usize = 48_000 * 600;
 
 /// Decodes PCM16 little-endian bytes into samples. A trailing odd byte is
 /// ignored.
@@ -45,17 +48,26 @@ pub fn samples_to_pcm16(samples: &[i16]) -> Bytes {
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when either rate is outside
-/// [`MIN_SAMPLE_RATE`]`..=`[`MAX_SAMPLE_RATE`].
+/// [`MIN_SAMPLE_RATE`]`..=`[`MAX_SAMPLE_RATE`], or when the result would
+/// exceed [`MAX_RESAMPLE_SAMPLES`].
 pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Result<Bytes> {
-    if from_rate == to_rate {
-        return Ok(bytes.clone());
-    }
     for rate in [from_rate, to_rate] {
         if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) {
             return Err(Error::InvalidConfig(format!(
                 "sample rate {rate} is outside {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE}"
             )));
         }
+    }
+    if from_rate == to_rate {
+        return Ok(bytes.clone());
+    }
+    let expected = (bytes.len() / 2)
+        .saturating_mul(to_rate as usize)
+        .div_ceil(from_rate as usize);
+    if expected > MAX_RESAMPLE_SAMPLES {
+        return Err(Error::InvalidConfig(format!(
+            "resampling would produce {expected} samples, more than {MAX_RESAMPLE_SAMPLES}"
+        )));
     }
     let input = pcm16_to_samples(bytes);
     if input.is_empty() {
@@ -149,7 +161,7 @@ pub fn duration_ms(byte_len: usize, sample_rate: u32) -> u64 {
     if sample_rate == 0 {
         return 0;
     }
-    (byte_len as u64 / 2) * 1000 / u64::from(sample_rate)
+    (byte_len as u64 / 2).saturating_mul(1000) / u64::from(sample_rate)
 }
 
 #[cfg(test)]

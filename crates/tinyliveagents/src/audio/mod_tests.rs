@@ -20,7 +20,14 @@ fn a_trailing_odd_byte_is_ignored() {
 fn equal_rates_pass_through_and_extreme_rates_are_refused() {
     let bytes = samples_to_pcm16(&[1, 2, 3]);
     assert_eq!(resample_pcm16(&bytes, 16_000, 16_000).unwrap(), bytes);
-    for (from, to) in [(0, 16_000), (16_000, 0), (1, u32::MAX), (16_000, 192_001)] {
+    for (from, to) in [
+        (0, 16_000),
+        (16_000, 0),
+        (1, u32::MAX),
+        (16_000, 192_001),
+        (0, 0),
+        (u32::MAX, u32::MAX),
+    ] {
         assert!(matches!(
             resample_pcm16(&bytes, from, to),
             Err(Error::InvalidConfig(_))
@@ -29,11 +36,22 @@ fn equal_rates_pass_through_and_extreme_rates_are_refused() {
 }
 
 #[test]
+fn oversized_results_are_refused() {
+    // Ten minutes and a bit at 4 kHz, upsampled 48x.
+    let long = Bytes::from(vec![0_u8; 2 * 4_000 * 601]);
+    assert!(matches!(
+        resample_pcm16(&long, 4_000, 192_000),
+        Err(Error::InvalidConfig(_))
+    ));
+}
+
+#[test]
 fn empty_input_resamples_to_empty() {
     assert!(
         resample_pcm16(&Bytes::new(), 24_000, 16_000)
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "expected nothing"
     );
 }
 
@@ -91,4 +109,5 @@ fn durations_are_computed_from_byte_length() {
     assert_eq!(duration_ms(32_000, 16_000), 1000);
     assert_eq!(duration_ms(3_200, 16_000), 100);
     assert_eq!(duration_ms(100, 0), 0);
+    assert_eq!(duration_ms(usize::MAX, 1), u64::MAX);
 }
