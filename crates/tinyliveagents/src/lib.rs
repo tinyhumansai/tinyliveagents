@@ -35,10 +35,11 @@
 //! # Example
 //!
 //! ```no_run
+//! # #[cfg(feature = "gemini")]
+//! # async fn run() -> tinyliveagents::Result<()> {
 //! use tinyliveagents::{LiveConfig, LiveEvent, LiveProvider, ToolResult};
 //! use tinyliveagents::gemini::GeminiLive;
 //!
-//! # async fn run() -> tinyliveagents::Result<()> {
 //! let provider = GeminiLive::new("api-key");
 //! let mut session = provider
 //!     .connect(LiveConfig::new().with_system_instruction("Be brief."))

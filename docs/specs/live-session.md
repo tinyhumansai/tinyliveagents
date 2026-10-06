@@ -39,13 +39,13 @@ and tool calls. Provider differences are the library's problem.
 | `Audio` in | `realtimeInput.audio` | `user_audio_chunk` (resampled to the agent's rate) | STT `audio_input` |
 | `Audio` out | `serverContent.modelTurn.parts[].inlineData` | `audio.audio_event` | TTS `audio` (`linear16`) |
 | `Text` | `clientContent` turn | `user_message` | a user turn |
-| `InputTranscript` | accumulated `inputTranscription`; final when the model answers | `tentative_user_transcript` / `user_transcript` | `transcript.partial` / `transcript.final` |
+| `InputTranscript` | accumulated `inputTranscription`; final at `turnComplete` (input is unordered relative to output) | `tentative_user_transcript` / `user_transcript` | `transcript.partial` / `transcript.final` |
 | `OutputTranscript` | accumulated `outputTranscription` (or text parts); final at turn end or interruption | `agent_response` (partial; final once corrected or when the next user or agent turn starts), `agent_response_correction` (final) | streamed completion text; final at the end of each completion |
 | `ToolCall` | `toolCall.functionCalls[]` | `client_tool_call` | completion `tool_calls` |
 | `ToolResult` | `toolResponse.functionResponses[]` (object response) | `client_tool_result` (string result) | a `tool` message, then a follow-up completion |
 | `ToolCallCancelled` | `toolCallCancellation` | — | barge-in during a tool wait |
 | `Interrupted` | `serverContent.interrupted` | `interruption` | `vad.speech_start` or a new utterance / typed message while a turn runs, or `ClientCommand::Interrupt` |
-| `TurnComplete` | `turnComplete` (+ `usageMetadata`) | — (no such frame) | after the reply finished speaking |
+| `TurnComplete` | `turnComplete` (+ `usageMetadata`) | `agent_response_complete`, when the agent enables it | after the reply finished speaking |
 | `ResumptionHandle` | `sessionResumptionUpdate` | — | — |
 | `GoAway` | `goAway.timeLeft` | — | — |
 

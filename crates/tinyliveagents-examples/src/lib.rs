@@ -121,8 +121,12 @@ pub async fn read_wav_16k(path: &Path) -> Result<Vec<u8>, BoxError> {
 ///
 /// # Errors
 ///
-/// When the audio or the byte rate does not fit a WAV header's 32-bit fields.
+/// When the audio has an odd length, or it or the byte rate does not fit a
+/// WAV header's 32-bit fields.
 pub fn wav_bytes(rate: u32, pcm: &[u8]) -> Result<Vec<u8>, BoxError> {
+    if pcm.len() % 2 != 0 {
+        return Err("PCM16 audio must have an even number of bytes".into());
+    }
     let data_len = u32::try_from(pcm.len()).map_err(|_| "audio is too long for a wav file")?;
     let riff_len = data_len
         .checked_add(36)
@@ -340,7 +344,10 @@ pub async fn converse(
                 println!("tool call: {} {}", call.name, call.args);
                 let result = answer_get_time(&call);
                 recording.tool_calls.push(call);
-                sender.send_tool_result(result).await?;
+                if let Err(error) = sender.send_tool_result(result).await {
+                    pump.abort();
+                    return Err(error.into());
+                }
             }
             LiveEvent::TurnComplete { .. } => {
                 recording.turns += 1;

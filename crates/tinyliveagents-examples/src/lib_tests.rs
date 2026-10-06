@@ -75,3 +75,8 @@ fn streaming_data_sizes_run_to_the_end() {
         assert_eq!(parse_wav(&file).unwrap(), (8_000, vec![5, 6]));
     }
 }
+
+#[test]
+fn odd_length_audio_is_refused() {
+    assert!(wav_bytes(16_000, &[0]).is_err());
+}

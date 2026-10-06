@@ -54,12 +54,20 @@ impl MockServer {
     /// Accepts one connection and runs `handler` on it.
     pub(crate) async fn start<F, Fut>(handler: F) -> Self
     where
-        F: FnOnce(ServerSocket, Upgrade) -> Fut + Send + Clone + 'static,
+        F: FnOnce(ServerSocket, Upgrade) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        Self::start_many(1, move |_, socket, upgrade| handler(socket, upgrade)).await
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (socket, upgrade) = accept(&listener).await;
+            handler(socket, upgrade).await;
+        });
+        Self { url, task }
     }
 
+    // Only the Sarvam cascade opens several sockets (one TTS socket per turn).
+    #[cfg(feature = "sarvam")]
     /// Accepts `count` connections in order and runs `handler` on each with
     /// its index.
     pub(crate) async fn start_many<F, Fut>(count: usize, handler: F) -> Self
@@ -72,25 +80,7 @@ impl MockServer {
         let task = tokio::spawn(async move {
             let mut running = Vec::new();
             for index in 0..count {
-                let (stream, _) = listener.accept().await.unwrap();
-                let captured = Arc::new(Mutex::new(Upgrade::default()));
-                let sink = captured.clone();
-                let socket = tokio_tungstenite::accept_hdr_async(
-                    stream,
-                    move |request: &Request, response: Response| {
-                        let mut upgrade = sink.lock().unwrap();
-                        upgrade.uri = request.uri().to_string();
-                        upgrade.headers = request
-                            .headers()
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                            .collect();
-                        Ok(response)
-                    },
-                )
-                .await
-                .unwrap();
-                let upgrade = captured.lock().unwrap().clone();
+                let (socket, upgrade) = accept(&listener).await;
                 let handler = handler.clone();
                 running.push(tokio::spawn(handler(index, socket, upgrade)));
             }
@@ -105,6 +95,30 @@ impl MockServer {
     pub(crate) async fn finish(self) {
         self.task.await.unwrap();
     }
+}
+
+/// Accepts one WebSocket connection, capturing its upgrade request.
+async fn accept(listener: &TcpListener) -> (ServerSocket, Upgrade) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let captured = Arc::new(Mutex::new(Upgrade::default()));
+    let sink = captured.clone();
+    let socket = tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |request: &Request, response: Response| {
+            let mut upgrade = sink.lock().unwrap();
+            upgrade.uri = request.uri().to_string();
+            upgrade.headers = request
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            Ok(response)
+        },
+    )
+    .await
+    .unwrap();
+    let upgrade = captured.lock().unwrap().clone();
+    (socket, upgrade)
 }
 
 /// Reads frames until the next JSON text or binary frame and parses it.
