@@ -360,6 +360,8 @@ fn parses_durations() {
     assert_eq!(duration_ms("10"), None);
     assert_eq!(duration_ms("-1s"), None);
     assert_eq!(duration_ms("xs"), None);
+    assert_eq!(duration_ms("1e300s"), None);
+    assert_eq!(duration_ms("infs"), None);
 }
 
 #[test]

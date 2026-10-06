@@ -55,6 +55,19 @@ fn oversized_inputs_are_refused_even_when_downsampling() {
 }
 
 #[test]
+fn odd_length_pcm_is_refused() {
+    let odd = Bytes::from_static(&[0, 0, 0]);
+    assert!(matches!(
+        resample_pcm16(&odd, 16_000, 8_000),
+        Err(Error::InvalidConfig(_))
+    ));
+    assert!(matches!(
+        resample_pcm16(&odd, 16_000, 16_000),
+        Err(Error::InvalidConfig(_))
+    ));
+}
+
+#[test]
 fn empty_input_resamples_to_empty() {
     assert!(
         resample_pcm16(&Bytes::new(), 24_000, 16_000)

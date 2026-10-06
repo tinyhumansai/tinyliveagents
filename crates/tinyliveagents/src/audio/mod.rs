@@ -48,8 +48,9 @@ pub fn samples_to_pcm16(samples: &[i16]) -> Bytes {
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when either rate is outside
-/// [`MIN_SAMPLE_RATE`]`..=`[`MAX_SAMPLE_RATE`], or when the result would
-/// exceed [`MAX_RESAMPLE_SAMPLES`].
+/// [`MIN_SAMPLE_RATE`]`..=`[`MAX_SAMPLE_RATE`], when the input has an odd
+/// number of bytes (it is not PCM16), or when the result would exceed
+/// [`MAX_RESAMPLE_SAMPLES`].
 pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Result<Bytes> {
     for rate in [from_rate, to_rate] {
         if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) {
@@ -57,6 +58,11 @@ pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Result<Byt
                 "sample rate {rate} is outside {MIN_SAMPLE_RATE}..={MAX_SAMPLE_RATE}"
             )));
         }
+    }
+    if !bytes.len().is_multiple_of(2) {
+        return Err(Error::InvalidConfig(
+            "pcm16 audio must have an even number of bytes".into(),
+        ));
     }
     if from_rate == to_rate {
         return Ok(bytes.clone());

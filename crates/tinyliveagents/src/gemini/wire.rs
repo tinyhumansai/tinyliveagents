@@ -206,8 +206,15 @@ pub(crate) fn duration_ms(text: &str) -> Option<u64> {
     if seconds.is_sign_negative() || !seconds.is_finite() {
         return None;
     }
+    let millis = (seconds * 1000.0).round();
+    // `u64::MAX as f64` rounds up to 2^64, so `<` excludes every overflow.
+    #[allow(clippy::cast_precision_loss)]
+    let limit = u64::MAX as f64;
+    if !millis.is_finite() || millis >= limit {
+        return None;
+    }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some((seconds * 1000.0).round() as u64)
+    Some(millis as u64)
 }
 
 fn usage_from(metadata: &Value) -> Usage {
