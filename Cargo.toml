@@ -1,56 +1,73 @@
 [workspace]
 resolver = "3"
-# Every crate in this repository lives under `crates/`, one directory per
-# package, each directory named for the package it holds. There is no root
-# package: the crate a host loads is `crates/template`, the same as any other
-# member. Keeping the root virtual is what makes that uniform — a root package
-# would make one crate structurally different from the rest for no reason other
-# than history, and it is the arrangement this template moved away from.
+# Every crate lives under `crates/`, one directory per package, each directory
+# named for the package it holds. There is no root package.
 members = ["crates/*"]
-# `vendor/` holds the pinned TinyBus submodule, which is its own workspace with
-# its own lockfile. `worktrees/` holds `git worktree` checkouts of this same
-# repository; each contains a full copy of this manifest and every crate under
-# it, so without this entry cargo walks into them and reports duplicate
-# packages.
+# `cargo test` / `cargo build` with no `-p` cover the library only. The
+# examples crate holds the live, network-touching tests and runnable demos; it
+# is built by `--workspace` / `--all-targets` runs but never runs against a real
+# provider unless its `#[ignore]`d tests are asked for explicitly.
+default-members = ["crates/tinyliveagents"]
+# `worktrees/` holds `git worktree` checkouts of this same repository; each
+# contains a full copy of this manifest, so without this entry cargo walks into
+# them and reports duplicate packages.
 exclude = ["vendor", "worktrees"]
 
 # Shared package metadata. A member inherits a field with `field.workspace =
 # true`, so the version the release workflow bumps is written in exactly one
 # place and every crate moves together.
 [workspace.package]
-version = "0.2.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"
-repository = "https://github.com/tinyhumansai/rust-template"
+repository = "https://github.com/tinyhumansai/tinyliveagents"
 
 [workspace.dependencies]
-# The wire contract. `crates/template` depends on it and re-exports it, so a
-# host that only makes calls takes this crate alone.
-# No `version` requirement on purpose: the workspace version moves on every
-# release, and a pinned requirement here would stop resolving the moment it did.
-# Nothing in this workspace is published, so the path is the whole address.
-template-bus = { path = "crates/template-bus" }
-# TinyBus defines the message types, interface macro, and frozen module ABI
-# used by the generated integration. Socket and CLI features are unnecessary
-# here.
-tinybus = { path = "vendor/tinybus/crates/tinybus", version = "0.1.0", default-features = false, features = [
+tinyliveagents = { path = "crates/tinyliveagents" }
+# Every provider session is a tokio task driving one or more sockets.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
     "macros",
-    "modules",
+    "sync",
+    "time",
+    "net",
 ] }
-# The module-side SDK owns the isolated runtime and exports the ABI entrypoints
-# required by TinyBus's dynamic loader.
-tinybus-module = { path = "vendor/tinybus/crates/tinybus-module", version = "0.1.0" }
-# Derive macros for the crate-wide error type in `crates/template/src/error/`.
-# Every dependency entry should carry a comment like this one saying why it is
-# here.
-thiserror = "2"
-# The bus payload types are serialized into TinyBus frames.
+# WebSocket client (and, in tests, the mock server) for every provider.
+# rustls with the webpki roots keeps the crate free of a system TLS library.
+# 0.29 matches the version OpenHuman already ships, so vendoring this crate
+# adds no second copy of tungstenite.
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+# `SinkExt` / `StreamExt` over the WebSocket halves.
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+] }
+# Cheaply cloned audio buffers; tungstenite frames already carry `Bytes`.
+bytes = "1"
+# Provider wire frames are JSON.
 serde = { version = "1", features = ["derive"] }
-# Positional argument arrays and the module configuration blob.
 serde_json = "1"
-# Module integration tests exercise the real asynchronous in-memory TinyBus.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Base64 audio payloads (Gemini, ElevenLabs, Sarvam all wrap PCM in JSON).
+base64 = "0.22"
+# The crate-wide error enum.
+thiserror = "2"
+# `LiveProvider` is an async trait used behind `dyn`.
+async-trait = "0.1"
+# Building provider URLs with escaped query parameters.
+url = "2"
+# Sarvam's chat completions endpoint is plain HTTPS with SSE streaming.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-webpki-roots",
+] }
+# Structured, content-free diagnostics for hosts that install a subscriber.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Lints apply to every member that opts in with `[lints] workspace = true`, and
 # to every target of that member. CI runs clippy with `-D warnings`, so anything
@@ -84,7 +101,6 @@ broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 
 [profile.release]
-# Cross-crate optimization and smaller, faster binaries for release builds.
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"

@@ -1,0 +1,82 @@
+//! PCM16 helpers: sample conversion, resampling, and durations.
+//!
+//! Every provider speaks 16-bit little-endian mono PCM, but not at the same
+//! rate: Gemini answers at 24 kHz, ElevenLabs at whatever its agent is set to,
+//! Sarvam at the rate requested. A host that plays audio at one rate, or a
+//! provider adapter that must hand a chained stage a fixed rate, uses
+//! [`resample_pcm16`]. The resampler is linear interpolation: cheap, allocation
+//! bounded, and plenty for speech. Nothing here does I/O.
+
+use bytes::Bytes;
+
+/// Decodes PCM16 little-endian bytes into samples. A trailing odd byte is
+/// ignored.
+#[must_use]
+pub fn pcm16_to_samples(bytes: &[u8]) -> Vec<i16> {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    pairs.iter().map(|pair| i16::from_le_bytes(*pair)).collect()
+}
+
+/// Encodes samples as PCM16 little-endian bytes.
+#[must_use]
+pub fn samples_to_pcm16(samples: &[i16]) -> Bytes {
+    let mut out = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    Bytes::from(out)
+}
+
+/// Resamples PCM16 mono audio from `from_rate` to `to_rate` Hz.
+///
+/// Returns the input unchanged when the rates match or either is zero.
+#[must_use]
+pub fn resample_pcm16(bytes: &Bytes, from_rate: u32, to_rate: u32) -> Bytes {
+    if from_rate == to_rate || from_rate == 0 || to_rate == 0 {
+        return bytes.clone();
+    }
+    let input = pcm16_to_samples(bytes);
+    if input.is_empty() {
+        return Bytes::new();
+    }
+    let ratio = f64::from(from_rate) / f64::from(to_rate);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let out_len = ((input.len() as f64) / ratio).round().max(1.0) as usize;
+    let last = input.len() - 1;
+    let mut output = Vec::with_capacity(out_len);
+    for index in 0..out_len {
+        #[allow(clippy::cast_precision_loss)]
+        let position = index as f64 * ratio;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let left = (position.floor() as usize).min(last);
+        let right = (left + 1).min(last);
+        #[allow(clippy::cast_precision_loss)]
+        let fraction = position - left as f64;
+        let value =
+            f64::from(input[left]) + (f64::from(input[right]) - f64::from(input[left])) * fraction;
+        #[allow(clippy::cast_possible_truncation)]
+        output.push(
+            value
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16,
+        );
+    }
+    samples_to_pcm16(&output)
+}
+
+/// Milliseconds of audio in `byte_len` bytes of PCM16 mono at `sample_rate`.
+#[must_use]
+pub fn duration_ms(byte_len: usize, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    (byte_len as u64 / 2) * 1000 / u64::from(sample_rate)
+}
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
