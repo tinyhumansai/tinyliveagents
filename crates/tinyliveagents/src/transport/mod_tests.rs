@@ -8,11 +8,15 @@ async fn connect_rejects_bad_urls_and_headers() {
         Err(Error::Connect(_))
     ));
     assert!(matches!(
-        connect("ws://127.0.0.1:9", &[("x-bad", "line\nbreak".into())]).await,
+        connect(
+            &crate::test_support::closed_url("ws").await,
+            &[("x-bad", "line\nbreak".into())]
+        )
+        .await,
         Err(Error::InvalidConfig(_))
     ));
     assert!(matches!(
-        connect("ws://127.0.0.1:9", &[]).await,
+        connect(&crate::test_support::closed_url("ws").await, &[]).await,
         Err(Error::Connect(_))
     ));
 }

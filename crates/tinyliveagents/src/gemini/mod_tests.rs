@@ -1,7 +1,7 @@
 //! End-to-end tests for the Gemini providers against a mock Live server.
 
 use super::*;
-use crate::testkit::{
+use crate::test_support::{
     MockServer, close_with, collect_events, expect_close, next_event, next_json, send_json,
 };
 use crate::types::{CloseReason, ToolDeclaration, ToolResult};
@@ -100,7 +100,7 @@ async fn direct_rejects_an_empty_key_and_bad_config() {
         provider.connect(LiveConfig::new()).await,
         Err(Error::InvalidConfig(_))
     ));
-    let provider = GeminiLive::new("k").with_endpoint("ws://127.0.0.1:9");
+    let provider = GeminiLive::new("k").with_endpoint(crate::test_support::closed_url("ws").await);
     let mut config = LiveConfig::new();
     config.input_format = crate::AudioFormat::pcm16(8_000);
     assert!(matches!(
@@ -182,7 +182,10 @@ async fn relay_is_ready_at_once_and_maps_credit_exhaustion() {
 
 #[tokio::test]
 async fn relay_surfaces_refused_tickets() {
-    let provider = GeminiRelay::connect_url("ws://127.0.0.1:9/live");
+    let provider = GeminiRelay::connect_url(format!(
+        "{}/live",
+        crate::test_support::closed_url("ws").await
+    ));
     assert!(matches!(
         provider.connect(LiveConfig::new()).await,
         Err(Error::Connect(_))

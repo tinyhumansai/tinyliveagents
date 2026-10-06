@@ -58,19 +58,6 @@
 //! # }
 //! ```
 
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::too_many_lines,
-        clippy::assert_is_empty,
-        clippy::match_wildcard_for_single_variants,
-        clippy::result_large_err,
-        clippy::type_complexity
-    )
-)]
 pub mod audio;
 mod error;
 mod provider;
@@ -90,7 +77,7 @@ pub mod sarvam;
     test,
     any(feature = "gemini", feature = "elevenlabs", feature = "sarvam")
 ))]
-mod testkit;
+mod test_support;
 
 pub use error::{Error, Result};
 pub use provider::LiveProvider;

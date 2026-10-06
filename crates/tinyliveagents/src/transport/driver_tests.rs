@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::session::session_pair;
-use crate::testkit::{MockServer, close_with, collect_events, next_event, next_json, send_json};
+use crate::test_support::{
+    MockServer, close_with, collect_events, next_event, next_json, send_json,
+};
 use crate::transport::{connect, json_frame};
 use crate::types::ClientCommand;
 use bytes::Bytes;
@@ -74,7 +76,7 @@ async fn drives_open_encode_reply_decode_and_client_close() {
         ws.send(Message::Binary(Bytes::from_static(b"not json")))
             .await
             .unwrap();
-        assert_eq!(crate::testkit::expect_close(&mut ws).await, Some(1000));
+        assert_eq!(crate::test_support::expect_close(&mut ws).await, Some(1000));
     })
     .await;
 
@@ -143,7 +145,7 @@ async fn a_fatal_event_ends_the_session() {
     let server = MockServer::start(|mut ws, _| async move {
         let _ = next_json(&mut ws).await;
         send_json(&mut ws, json!({"fatal": true})).await;
-        let _ = crate::testkit::expect_close(&mut ws).await;
+        let _ = crate::test_support::expect_close(&mut ws).await;
     })
     .await;
     let socket = connect(&server.url, &[]).await.unwrap();
@@ -177,7 +179,7 @@ async fn dropping_the_host_side_stops_the_driver() {
     let server = MockServer::start(|mut ws, _| async move {
         let _ = next_json(&mut ws).await;
         send_json(&mut ws, json!({"interrupt": true})).await;
-        let _ = crate::testkit::expect_close(&mut ws).await;
+        let _ = crate::test_support::expect_close(&mut ws).await;
     })
     .await;
     let socket = connect(&server.url, &[]).await.unwrap();
@@ -195,7 +197,7 @@ async fn control_frames_are_skipped() {
             .await
             .unwrap();
         send_json(&mut ws, json!({"interrupt": true})).await;
-        let _ = crate::testkit::expect_close(&mut ws).await;
+        let _ = crate::test_support::expect_close(&mut ws).await;
     })
     .await;
     let socket = connect(&server.url, &[]).await.unwrap();
@@ -219,7 +221,7 @@ async fn a_host_that_leaves_mid_stream_stops_the_driver() {
                 Value::String(_) => ws.send(Message::Text("not json".into())).await.unwrap(),
                 other => send_json(&mut ws, other).await,
             }
-            let _ = crate::testkit::expect_close(&mut ws).await;
+            let _ = crate::test_support::expect_close(&mut ws).await;
         })
         .await;
         let socket = connect(&server.url, &[]).await.unwrap();

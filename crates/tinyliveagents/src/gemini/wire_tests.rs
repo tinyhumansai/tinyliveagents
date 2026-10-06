@@ -40,7 +40,7 @@ fn direct_sends_setup_and_becomes_ready_on_setup_complete() {
     let mut c = codec(Mode::Direct(json!({"setup": {}})), TurnDetection::Server);
     let (frames, initial) = c.on_open();
     assert_eq!(text_of(&frames[0]), json!({"setup": {}}));
-    assert!(initial.is_empty());
+    assert!(initial.is_empty(), "expected nothing");
 
     let got = decode(&mut c, &json!({"setupComplete": {}}));
     match &got[0] {
@@ -52,16 +52,22 @@ fn direct_sends_setup_and_becomes_ready_on_setup_complete() {
         other => panic!("{other:?}"),
     }
     // A repeated setupComplete is not a second Ready.
-    assert!(decode(&mut c, &json!({"setupComplete": {}})).is_empty());
+    assert!(
+        decode(&mut c, &json!({"setupComplete": {}})).is_empty(),
+        "expected nothing"
+    );
 }
 
 #[test]
 fn relay_is_ready_on_open() {
     let mut c = codec(Mode::Relay, TurnDetection::Server);
     let (frames, initial) = c.on_open();
-    assert!(frames.is_empty());
+    assert!(frames.is_empty(), "expected nothing");
     assert!(matches!(initial[0], LiveEvent::Ready(_)));
-    assert!(decode(&mut c, &json!({"setupComplete": {}})).is_empty());
+    assert!(
+        decode(&mut c, &json!({"setupComplete": {}})).is_empty(),
+        "expected nothing"
+    );
 }
 
 #[test]
@@ -98,8 +104,14 @@ fn encodes_every_command() {
         text_of(&c.encode(ClientCommand::ActivityEnd)[0]),
         json!({"realtimeInput": {"audioStreamEnd": true}})
     );
-    assert!(c.encode(ClientCommand::Interrupt).is_empty());
-    assert!(c.encode(ClientCommand::Close).is_empty());
+    assert!(
+        c.encode(ClientCommand::Interrupt).is_empty(),
+        "expected nothing"
+    );
+    assert!(
+        c.encode(ClientCommand::Close).is_empty(),
+        "expected nothing"
+    );
 
     let mut manual = codec(Mode::Relay, TurnDetection::Manual);
     assert_eq!(
@@ -275,7 +287,10 @@ fn decodes_tool_calls_and_cancellations() {
             call_ids: vec!["c1".into()]
         }]
     );
-    assert!(decode(&mut c, &json!({"toolCall": {}})).is_empty());
+    assert!(
+        decode(&mut c, &json!({"toolCall": {}})).is_empty(),
+        "expected nothing"
+    );
     assert_eq!(
         decode(&mut c, &json!({"toolCallCancellation": {}})),
         vec![LiveEvent::ToolCallCancelled { call_ids: vec![] }]
@@ -297,7 +312,8 @@ fn decodes_resumption_go_away_and_errors() {
             &mut c,
             &json!({"sessionResumptionUpdate": {"newHandle": "h", "resumable": false}})
         )
-        .is_empty()
+        .is_empty(),
+        "expected nothing"
     );
     assert_eq!(
         decode(&mut c, &json!({"goAway": {"timeLeft": "1.5s"}})),
@@ -323,7 +339,10 @@ fn decodes_resumption_go_away_and_errors() {
             fatal: false
         }]
     );
-    assert!(decode(&mut c, &json!({"somethingNew": 1})).is_empty());
+    assert!(
+        decode(&mut c, &json!({"somethingNew": 1})).is_empty(),
+        "expected nothing"
+    );
 }
 
 #[test]

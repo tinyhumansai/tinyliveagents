@@ -5,6 +5,16 @@
 //! path, query and headers a provider sent, then play the provider's side of
 //! the protocol frame by frame.
 
+#![cfg(any(feature = "gemini", feature = "elevenlabs", feature = "sarvam"))]
+// Fixtures for `#[cfg(test)]` code only: a failed fixture step must fail the
+// test, which is what unwrap/expect/panic do. Clippy's `allow-*-in-tests`
+// settings cover `#[test]` functions and `tests` modules but not a shared
+// fixture module, so the same allowance is stated here, for this module only.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// tungstenite's handshake callback returns `Result<Response, ErrorResponse>`;
+// the large error type is its signature, not a choice made here.
+#![allow(clippy::result_large_err)]
+
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -177,13 +187,17 @@ pub(crate) async fn next_event(session: &mut crate::LiveSession) -> crate::LiveE
         .expect("session ended")
 }
 
+/// Request headers, one list per request.
+#[cfg(feature = "sarvam")]
+pub(crate) type RecordedHeaders = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
 #[cfg(feature = "sarvam")]
 /// A sequential mock HTTP server: answers the `n`th request with the `n`th
 /// canned response and records every request body as JSON.
 pub(crate) struct MockHttp {
     pub(crate) url: String,
     pub(crate) requests: Arc<Mutex<Vec<Value>>>,
-    pub(crate) headers: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+    pub(crate) headers: RecordedHeaders,
 }
 
 #[cfg(feature = "sarvam")]
@@ -235,7 +249,12 @@ impl MockHttp {
                     }
                     raw.extend_from_slice(&buf[..n]);
                 }
-                let body_json = serde_json::from_slice(&raw[head_end..head_end + length])
+                // A client that hung up early leaves a short body; record
+                // what arrived (or null) rather than slicing past it.
+                let end = head_end.saturating_add(length).min(raw.len());
+                let body_json = raw
+                    .get(head_end..end)
+                    .and_then(|body| serde_json::from_slice(body).ok())
                     .unwrap_or(Value::Null);
                 req_sink.lock().unwrap().push(body_json);
                 let response = format!(
@@ -278,4 +297,13 @@ pub(crate) fn tool_chunk(id: &str, name: &str, args: &str) -> Value {
     serde_json::json!({ "choices": [{ "delta": { "tool_calls": [
         { "index": 0, "id": id, "function": { "name": name, "arguments": args } }
     ] }, "index": 0 }] })
+}
+
+/// A loopback URL nothing listens on: a port bound and released by this
+/// process, so connecting fails fast without touching any real service.
+pub(crate) async fn closed_url(scheme: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("{scheme}://{addr}")
 }
