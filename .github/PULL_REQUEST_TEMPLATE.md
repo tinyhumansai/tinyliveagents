@@ -17,7 +17,7 @@ Commands actually run, with their outcome:
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] `cargo build --all-targets --all-features`
-- [ ] `cargo test --all-features`
+- [ ] `cargo test --workspace --all-features`
 
 ## Tests
 

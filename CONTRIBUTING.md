@@ -15,7 +15,7 @@ git submodule update --init --recursive
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
-cargo test --all-features
+cargo test --workspace --all-features
 ```
 
 CI also requires at least 90% line coverage in every source file. After
@@ -62,7 +62,7 @@ regardless.
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] `cargo build --all-targets --all-features`
-- [ ] `cargo test --all-features`
+- [ ] `cargo test --workspace --all-features`
 - [ ] `.github/scripts/check-file-coverage.sh 90 target/coverage.json`
 - [ ] tests added or updated for behavior changes
 - [ ] documentation updated for public API, architecture, or usage changes

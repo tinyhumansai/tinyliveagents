@@ -1,0 +1,8 @@
+# Product and protocol names that `clippy::doc_markdown` would otherwise ask to
+# wrap in backticks. ".." keeps clippy's default list.
+doc-valid-idents = ["ElevenLabs", "TinyHumans", "TinyBus", "WebSocket", "WebSockets", "OpenAI", "OpenHuman", ".."]
+# AGENTS.md allows unwrap/expect/panic in tests. These scope that to
+# `#[test]` functions and `#[cfg(test)]` code instead of an attribute.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

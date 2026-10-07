@@ -9,9 +9,12 @@ workspace_root="$(pwd -P)/"
 # excluded by the same test.
 source_root="${workspace_root}crates/"
 
+# `tinyliveagents-examples` holds live, network-only tests and demos; it is
+# excluded here because nothing in it can run offline.
 cargo llvm-cov \
   --locked \
   --workspace \
+  --exclude tinyliveagents-examples \
   --all-targets \
   --all-features \
   --json \
@@ -21,6 +24,7 @@ covered_files="$(jq --arg source_root "$source_root" '
   [
     .data[].files[]
     | select(.filename | startswith($source_root))
+    | select(.filename | contains("/tinyliveagents-examples/") | not)
     | select(.summary.lines.count > 0)
   ]
   | length
@@ -34,6 +38,7 @@ fi
 summary="$(jq -r --arg workspace_root "$workspace_root" --arg source_root "$source_root" '
   .data[].files[]
   | select(.filename | startswith($source_root))
+  | select(.filename | contains("/tinyliveagents-examples/") | not)
   | select(.summary.lines.count > 0)
   | [
       (.filename | ltrimstr($workspace_root)),
@@ -66,6 +71,7 @@ failures="$(jq -r \
   --argjson minimum "$minimum" '
     .data[].files[]
     | select(.filename | startswith($source_root))
+    | select(.filename | contains("/tinyliveagents-examples/") | not)
     | select(.summary.lines.count > 0)
     | select(.summary.lines.percent < $minimum)
     | "\(.filename | ltrimstr($workspace_root)): \(.summary.lines.percent)%"

@@ -1,0 +1,42 @@
+[package]
+name = "tinyliveagents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One standard API for live (realtime, speech-to-speech) voice agent providers."
+readme = "../../README.md"
+keywords = ["voice", "realtime", "agents", "gemini", "websocket"]
+categories = ["multimedia::audio", "api-bindings"]
+publish = false
+
+[dependencies]
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+# Only the chained Sarvam provider talks plain HTTPS (chat completions).
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[features]
+default = ["gemini", "elevenlabs", "sarvam"]
+# Gemini Live, direct (API key) and through a pre-minted relay ticket URL.
+gemini = []
+# ElevenLabs Conversational AI over a signed WebSocket URL.
+elevenlabs = []
+# Sarvam AI, chained: streaming STT -> chat completions (tools) -> streaming TTS.
+sarvam = ["dep:reqwest"]
+
+[lints]
+workspace = true
