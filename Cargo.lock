@@ -994,7 +994,7 @@ name = "tinyliveagents"
 version = "0.1.1"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "futures-util",
  "reqwest",
@@ -1011,7 +1011,7 @@ dependencies = [
 name = "tinyliveagents-examples"
 version = "0.1.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "reqwest",
  "serde_json",
